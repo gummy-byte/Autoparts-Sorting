@@ -260,7 +260,7 @@ const App: React.FC = () => {
   }, [filteredItems, currentPage]);
 
   return (
-    <div className="min-h-screen flex flex-col md:flex-row bg-[#fff1f5] font-['Inter']">
+    <div className="h-screen w-full flex flex-col md:flex-row bg-[#fff1f5] font-['Inter'] overflow-hidden">
       {/* Settings Modal */}
       {isSyncModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-pink-900/40 backdrop-blur-sm p-4">
@@ -286,8 +286,8 @@ const App: React.FC = () => {
       )}
 
       {/* Floating Sidebar Design */}
-      <aside className="w-full md:w-80 p-6 flex-shrink-0">
-        <div className="h-full bg-slate-900 text-white rounded-[2.5rem] shadow-2xl flex flex-col overflow-hidden relative border border-white/5">
+      <aside className="w-full md:w-80 p-6 flex-shrink-0 flex flex-col">
+        <div className="flex-1 bg-slate-900 text-white rounded-[2.5rem] shadow-2xl flex flex-col overflow-hidden relative border border-white/5">
           <div className="p-8">
             <div className="flex items-center gap-3 mb-10">
               <div className="bg-gradient-to-br from-pink-400 to-rose-600 p-2.5 rounded-2xl shadow-lg shadow-pink-500/20">
@@ -331,9 +331,9 @@ const App: React.FC = () => {
         </div>
       </aside>
 
-      <main className="flex-1 min-w-0 p-6 md:pl-0">
+      <main className="flex-1 min-w-0 p-6 md:pl-0 h-full">
         <div className="h-full flex flex-col">
-          <header className="bg-white/70 backdrop-blur-xl border border-white rounded-[2rem] px-8 py-5 flex flex-col sm:flex-row justify-between items-center gap-5 shadow-sm mb-6">
+          <header className="bg-white/70 backdrop-blur-xl border border-white rounded-[2rem] px-8 py-5 flex flex-col sm:flex-row justify-between items-center gap-5 shadow-sm mb-6 flex-shrink-0">
             <div>
               <h2 className="text-2xl font-black text-slate-800 tracking-tight">{activeTab === 'overview' ? 'Real-time Stats' : 'Manage Stock'}</h2>
               <div className="flex items-center gap-2 mt-1">
@@ -350,9 +350,9 @@ const App: React.FC = () => {
             </div>
           </header>
 
-          <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar">
+          <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar pb-6">
             {items.length === 0 ? (
-              <div className="flex flex-col items-center justify-center min-h-[60vh] text-center max-w-xl mx-auto px-6">
+              <div className="flex flex-col items-center justify-center min-h-full text-center max-w-xl mx-auto px-6">
                 <div className="relative mb-8">
                   <div className="absolute inset-0 bg-pink-500 blur-3xl opacity-20 animate-pulse"></div>
                   <div className="relative bg-white p-10 rounded-[3rem] shadow-2xl border border-pink-50"><Sparkles className="w-12 h-12 text-pink-500" /></div>
@@ -420,7 +420,7 @@ const App: React.FC = () => {
                   </div>
                 ) : (
                   <div className="bg-white rounded-[2.5rem] border border-white shadow-xl shadow-pink-900/5 overflow-hidden flex flex-col h-full">
-                    <div className="p-8 border-b border-pink-50 flex flex-col sm:flex-row gap-5 justify-between bg-pink-50/10">
+                    <div className="p-8 border-b border-pink-50 flex flex-col sm:flex-row gap-5 justify-between bg-pink-50/10 flex-shrink-0">
                       <div className="relative flex-1 group">
                         <Search className="absolute left-6 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-pink-500 transition-colors" />
                         <input type="text" placeholder="Search part codes, names..." className="w-full pl-14 pr-8 py-5 bg-white border-2 border-slate-100 rounded-[1.5rem] focus:ring-4 focus:ring-pink-500/10 focus:border-pink-500 outline-none transition-all text-sm font-bold shadow-sm" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
@@ -434,9 +434,9 @@ const App: React.FC = () => {
                         <ChevronDown className="absolute right-6 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
                       </div>
                     </div>
-                    <div className="overflow-x-auto">
+                    <div className="flex-1 overflow-y-auto">
                       <table className="w-full text-left table-fixed min-w-[800px]">
-                        <thead><tr className="text-slate-400 text-[10px] uppercase tracking-[0.3em] font-black border-b border-pink-50"><th className="px-10 py-7 w-48">SKU Code</th><th className="px-10 py-7">Description</th><th className="px-10 py-7 w-64">AI Label</th><th className="px-10 py-7 w-32 text-right">Qty</th></tr></thead>
+                        <thead className="sticky top-0 bg-white z-10"><tr className="text-slate-400 text-[10px] uppercase tracking-[0.3em] font-black border-b border-pink-50 shadow-sm"><th className="px-10 py-7 w-48">SKU Code</th><th className="px-10 py-7">Description</th><th className="px-10 py-7 w-64">AI Label</th><th className="px-10 py-7 w-32 text-right">Qty</th></tr></thead>
                         <tbody className="divide-y divide-pink-50">{paginatedItems.map(item => (
                           <tr key={item.id} className="hover:bg-pink-50/20 transition-colors group">
                             <td className="px-10 py-6 font-mono text-[11px] text-pink-600 font-black tracking-tight">{item.code}</td>
@@ -454,7 +454,7 @@ const App: React.FC = () => {
                         ))}</tbody></table>
                     </div>
                     {filteredItems.length > 0 && (
-                      <div className="mt-auto px-10 py-8 bg-pink-50/10 flex flex-col sm:flex-row items-center justify-between gap-6">
+                      <div className="mt-auto px-10 py-8 bg-pink-50/10 flex flex-col sm:flex-row items-center justify-between gap-6 flex-shrink-0">
                         <p className="text-sm text-slate-400 font-bold uppercase tracking-widest">Page <span className="text-pink-600 font-black">{currentPage}</span> / <span className="text-slate-800 font-black">{totalPages}</span></p>
                         <div className="flex items-center gap-3">
                           <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="p-4 rounded-[1.5rem] border border-pink-100 bg-white hover:bg-pink-50 disabled:opacity-30 transition-all shadow-sm"><ChevronLeft className="w-5 h-5 text-pink-600" /></button>
