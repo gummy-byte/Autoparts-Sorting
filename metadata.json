@@ -1,0 +1,5 @@
+{
+  "name": "AutoPart Categorizer Dash",
+  "description": "An inventory management dashboard for automotive parts that intelligently categorizes items from CSV data into types like filters, brakes, and fluids.",
+  "requestFramePermissions": []
+}
