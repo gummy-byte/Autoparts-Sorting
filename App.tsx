@@ -21,7 +21,11 @@ import {
   Check,
   Sparkles,
   Zap,
-  Share
+  Share,
+  FileText,
+  Layers,
+  X,
+  FileSpreadsheet
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -35,7 +39,6 @@ import {
   PieChart,
   Pie
 } from 'recharts';
-import { GoogleGenAI, Type } from "@google/genai";
 import { InventoryItem, ItemCategory, CategoryStat } from './types';
 import { classifyItem } from './utils/classifier';
 
@@ -79,8 +82,8 @@ const App: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string>("All");
   const [currentPage, setCurrentPage] = useState(1);
-  const [isAiRunning, setIsAiRunning] = useState(false);
   
+  // Sync States
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<'idle' | 'success' | 'error'>('idle');
@@ -88,6 +91,10 @@ const App: React.FC = () => {
     const saved = localStorage.getItem('gh_config');
     return saved ? JSON.parse(saved) : { token: '', repo: '', path: 'inventory_categorized.csv', branch: 'main' };
   });
+
+  // Export States
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [exportFormat, setExportFormat] = useState<'standard' | 'categorized'>('standard');
 
   useEffect(() => {
     localStorage.setItem('gh_config', JSON.stringify(ghConfig));
@@ -134,68 +141,136 @@ const App: React.FC = () => {
     setItems(parsedItems);
   };
 
-  const refineWithAI = async () => {
-    if (items.length === 0 || isAiRunning) return;
-    setIsAiRunning(true);
-
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
-      const prompt = `Categorize the following automotive parts into one of these exact categories: ${Object.values(ItemCategory).join(', ')}.
-      
-      Items:
-      ${items.map(item => `- Code: ${item.code}, Description: ${item.description}`).join('\n')}
-      
-      Return a JSON array of objects with 'code' and 'category'.`;
-
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                code: { type: Type.STRING },
-                category: { type: Type.STRING, enum: Object.values(ItemCategory) }
-              },
-              required: ["code", "category"]
-            }
-          }
-        }
-      });
-
-      const results = JSON.parse(response.text || '[]');
-      setItems(prev => prev.map(item => {
-        const aiMatch = results.find((r: any) => r.code === item.code);
-        return aiMatch ? { ...item, category: aiMatch.category as ItemCategory } : item;
-      }));
-    } catch (err) {
-      console.error("AI Categorization failed:", err);
-      alert("AI categorization failed. Check your API key.");
-    } finally {
-      setIsAiRunning(false);
-    }
-  };
-
   const handleCategoryChange = (id: string, newCategory: ItemCategory) => {
     setItems(prev => prev.map(item => item.id === id ? { ...item, category: newCategory } : item));
   };
 
-  const generateCSVString = () => {
+  const generateStandardCSV = () => {
     const headers = ["Quantity", "Code", "Description", "Category"];
     const rows = items.map(item => [item.qty, `"${item.code}"`, `"${item.description}"`, `"${item.category}"`]);
     return [headers, ...rows].map(e => e.join(",")).join("\n");
   };
 
-  const exportToCSV = () => {
-    if (items.length === 0) return;
-    const blob = new Blob([generateCSVString()], { type: 'text/csv;charset=utf-8;' });
+  const generateCategorizedCSVPreview = () => {
+    // This is just for the text preview box
+    let csv = "No,Code,Description,Qty\n";
+    const grouped = items.reduce((acc, item) => {
+      if (!acc[item.category]) acc[item.category] = [];
+      acc[item.category].push(item);
+      return acc;
+    }, {} as Record<string, InventoryItem[]>);
+    const sortedCategories = Object.keys(grouped).sort();
+    let globalIndex = 1;
+
+    sortedCategories.forEach(cat => {
+      csv += `\n[ ${cat.toUpperCase()} ]\n`; // Simplified text representation
+      grouped[cat].forEach(item => {
+        csv += `${globalIndex},"${item.code}","${item.description}",${item.qty}\n`;
+        globalIndex++;
+      });
+    });
+    return csv;
+  };
+
+  const generateCategorizedXLS = () => {
+    // This generates an HTML table that Excel interprets as a spreadsheet with formatting
+    const grouped = items.reduce((acc, item) => {
+      if (!acc[item.category]) acc[item.category] = [];
+      acc[item.category].push(item);
+      return acc;
+    }, {} as Record<string, InventoryItem[]>);
+    const sortedCategories = Object.keys(grouped).sort();
+    let globalIndex = 1;
+
+    let html = `
+      <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+      <head>
+        <meta charset="UTF-8">
+        <!--[if gte mso 9]>
+        <xml>
+          <x:ExcelWorkbook>
+            <x:ExcelWorksheets>
+              <x:ExcelWorksheet>
+                <x:Name>Inventory Report</x:Name>
+                <x:WorksheetOptions>
+                  <x:DisplayGridlines/>
+                </x:WorksheetOptions>
+              </x:ExcelWorksheet>
+            </x:ExcelWorksheets>
+          </x:ExcelWorkbook>
+        </xml>
+        <![endif]-->
+        <style>
+          table { border-collapse: collapse; width: 100%; font-family: Arial, sans-serif; }
+          th, td { border: 1px solid #e2e8f0; padding: 8px; text-align: left; }
+          .header { background-color: #f1f5f9; font-weight: bold; }
+          .category-header { background-color: #FFFF00; font-weight: bold; font-size: 14px; } 
+          .qty-col { text-align: right; }
+        </style>
+      </head>
+      <body>
+        <table>
+          <thead>
+            <tr class="header">
+              <th style="width: 50px">No</th>
+              <th style="width: 150px">Code</th>
+              <th style="width: 400px">Description</th>
+              <th style="width: 80px">Qty</th>
+            </tr>
+          </thead>
+          <tbody>
+    `;
+
+    sortedCategories.forEach(cat => {
+      // Category Header Row with Yellow Background
+      html += `
+        <tr>
+          <td colspan="4" class="category-header">${cat.toUpperCase()}</td>
+        </tr>
+      `;
+      
+      grouped[cat].forEach(item => {
+        html += `
+          <tr>
+            <td>${globalIndex}</td>
+            <td>${item.code}</td>
+            <td>${item.description}</td>
+            <td class="qty-col">${item.qty}</td>
+          </tr>
+        `;
+        globalIndex++;
+      });
+    });
+
+    html += `</tbody></table></body></html>`;
+    return html;
+  };
+
+  const getExportPreview = () => {
+    const content = exportFormat === 'standard' ? generateStandardCSV() : generateCategorizedCSVPreview();
+    const lines = content.split('\n');
+    return lines.slice(0, 10).join('\n') + (lines.length > 10 ? '\n...' : '');
+  };
+
+  const handleDownload = () => {
+    let content, mimeType, extension;
+
+    if (exportFormat === 'standard') {
+      content = generateStandardCSV();
+      mimeType = 'text/csv;charset=utf-8;';
+      extension = 'csv';
+    } else {
+      content = generateCategorizedXLS();
+      mimeType = 'application/vnd.ms-excel;charset=utf-8';
+      extension = 'xls';
+    }
+
+    const blob = new Blob([content], { type: mimeType });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = `categorized_inventory_${new Date().toISOString().split('T')[0]}.csv`;
+    link.download = `inventory_${exportFormat}_${new Date().toISOString().split('T')[0]}.${extension}`;
     link.click();
+    setIsExportModalOpen(false);
   };
 
   const syncToGitHub = async () => {
@@ -203,7 +278,7 @@ const App: React.FC = () => {
     setIsSyncing(true);
     setSyncStatus('idle');
     try {
-      const contentBase64 = btoa(unescape(encodeURIComponent(generateCSVString())));
+      const contentBase64 = btoa(unescape(encodeURIComponent(generateStandardCSV())));
       const getFile = await fetch(`https://api.github.com/repos/${ghConfig.repo}/contents/${ghConfig.path}?ref=${ghConfig.branch}`, {
         headers: { 'Authorization': `token ${ghConfig.token}`, 'Accept': 'application/vnd.github.v3+json' }
       });
@@ -267,7 +342,7 @@ const App: React.FC = () => {
           <div className="bg-white rounded-3xl w-full max-w-md p-8 shadow-2xl animate-in fade-in zoom-in duration-200 border border-pink-100">
             <div className="flex justify-between items-center mb-6">
               <h3 className="text-xl font-bold text-pink-800 flex items-center gap-2"><Github className="w-6 h-6" />GitHub Sync</h3>
-              <button onClick={() => setIsSyncModalOpen(false)} className="text-pink-300 hover:text-pink-600"><AlertCircle className="w-5 h-5 rotate-45" /></button>
+              <button onClick={() => setIsSyncModalOpen(false)} className="text-pink-300 hover:text-pink-600"><X className="w-5 h-5" /></button>
             </div>
             <div className="space-y-4">
               <div><label className="block text-[10px] font-bold text-pink-400 uppercase tracking-widest mb-1.5">Personal Access Token</label>
@@ -280,6 +355,65 @@ const App: React.FC = () => {
             <div className="mt-8 flex gap-3">
               <button onClick={() => setIsSyncModalOpen(false)} className="flex-1 py-3 text-pink-600 font-bold hover:bg-pink-50 rounded-xl transition-all">Cancel</button>
               <button onClick={() => { setIsSyncModalOpen(false); syncToGitHub(); }} className="flex-1 py-3 bg-pink-600 text-white font-bold rounded-xl transition-all shadow-xl shadow-pink-600/20 flex items-center justify-center gap-2"><Save className="w-4 h-4" />Save</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Export Format Modal */}
+      {isExportModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl w-full max-w-2xl p-8 shadow-2xl border border-pink-100 flex flex-col max-h-[90vh]">
+            <div className="flex justify-between items-center mb-8">
+              <div>
+                <h3 className="text-2xl font-black text-slate-800 tracking-tight">Export Inventory</h3>
+                <p className="text-slate-500 text-sm font-medium mt-1">Select your preferred file format</p>
+              </div>
+              <button onClick={() => setIsExportModalOpen(false)} className="p-2 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"><X className="w-6 h-6" /></button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+              <button 
+                onClick={() => setExportFormat('standard')}
+                className={`relative p-6 rounded-2xl border-2 text-left transition-all group ${exportFormat === 'standard' ? 'border-pink-500 bg-pink-50/50 ring-4 ring-pink-500/10' : 'border-slate-100 hover:border-pink-200 hover:bg-slate-50'}`}
+              >
+                <div className={`w-10 h-10 rounded-xl mb-4 flex items-center justify-center transition-colors ${exportFormat === 'standard' ? 'bg-pink-500 text-white' : 'bg-slate-100 text-slate-500 group-hover:bg-pink-100 group-hover:text-pink-600'}`}>
+                  <FileText className="w-5 h-5" />
+                </div>
+                <h4 className={`font-black text-sm uppercase tracking-wide mb-2 ${exportFormat === 'standard' ? 'text-pink-700' : 'text-slate-700'}`}>Standard CSV</h4>
+                <p className="text-xs text-slate-500 font-medium leading-relaxed">Flat list with Quantity, Code, Description, and Category columns. Best for further data processing.</p>
+                {exportFormat === 'standard' && <div className="absolute top-4 right-4 w-3 h-3 bg-pink-500 rounded-full shadow-lg shadow-pink-500/30"></div>}
+              </button>
+
+              <button 
+                onClick={() => setExportFormat('categorized')}
+                className={`relative p-6 rounded-2xl border-2 text-left transition-all group ${exportFormat === 'categorized' ? 'border-pink-500 bg-pink-50/50 ring-4 ring-pink-500/10' : 'border-slate-100 hover:border-pink-200 hover:bg-slate-50'}`}
+              >
+                <div className={`w-10 h-10 rounded-xl mb-4 flex items-center justify-center transition-colors ${exportFormat === 'categorized' ? 'bg-pink-500 text-white' : 'bg-slate-100 text-slate-500 group-hover:bg-pink-100 group-hover:text-pink-600'}`}>
+                  <FileSpreadsheet className="w-5 h-5" />
+                </div>
+                <h4 className={`font-black text-sm uppercase tracking-wide mb-2 ${exportFormat === 'categorized' ? 'text-pink-700' : 'text-slate-700'}`}>Categorized Excel Report</h4>
+                <p className="text-xs text-slate-500 font-medium leading-relaxed">Formatted .xls file with color-coded headers (Yellow) and grouped categories. Ready for printing.</p>
+                {exportFormat === 'categorized' && <div className="absolute top-4 right-4 w-3 h-3 bg-pink-500 rounded-full shadow-lg shadow-pink-500/30"></div>}
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-hidden flex flex-col min-h-0 mb-8 bg-slate-900 rounded-2xl border border-slate-800">
+              <div className="px-5 py-3 border-b border-slate-800 flex justify-between items-center bg-slate-900/50">
+                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-widest">File Preview</span>
+                <span className="text-[10px] font-mono text-slate-600">inventory_{exportFormat}.{exportFormat === 'standard' ? 'csv' : 'xls'}</span>
+              </div>
+              <div className="p-5 overflow-auto custom-scrollbar flex-1">
+                <pre className="font-mono text-xs text-slate-300 whitespace-pre leading-relaxed">{getExportPreview()}</pre>
+                {exportFormat === 'categorized' && <p className="text-[10px] text-pink-400 mt-2 font-mono">Note: Preview shows text structure. Downloaded file will include Yellow headers and formatting.</p>}
+              </div>
+            </div>
+
+            <div className="flex gap-4 pt-4 border-t border-slate-100">
+              <button onClick={() => setIsExportModalOpen(false)} className="flex-1 py-3.5 text-slate-500 font-bold hover:bg-slate-50 rounded-xl transition-all">Cancel</button>
+              <button onClick={handleDownload} className="flex-[2] py-3.5 bg-pink-600 hover:bg-pink-700 text-white font-bold rounded-xl transition-all shadow-xl shadow-pink-600/20 flex items-center justify-center gap-2">
+                <Download className="w-4 h-4" /> Download File
+              </button>
             </div>
           </div>
         </div>
@@ -308,15 +442,6 @@ const App: React.FC = () => {
           </div>
 
           <div className="mt-auto p-8 space-y-4 bg-white/5 backdrop-blur-md">
-            <button 
-              onClick={refineWithAI} 
-              disabled={items.length === 0 || isAiRunning}
-              className={`w-full group flex items-center justify-center gap-3 py-4 rounded-2xl text-xs font-black uppercase tracking-widest transition-all ${isAiRunning ? 'bg-pink-700 animate-pulse' : 'bg-gradient-to-r from-pink-500 via-rose-500 to-fuchsia-600 hover:scale-[1.03] shadow-lg shadow-pink-500/20 hover:shadow-pink-500/40'} text-white disabled:opacity-50`}
-            >
-              {isAiRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4 text-pink-200 group-hover:rotate-12 transition-transform" />}
-              {isAiRunning ? 'Thinking...' : 'AI Categorize'}
-            </button>
-            
             <div className="p-5 bg-white/5 rounded-3xl border border-white/10">
               <div className="flex justify-between items-center mb-4">
                 <p className="text-[10px] text-pink-400 uppercase tracking-[0.2em] font-black">Sync Engine</p>
@@ -327,6 +452,10 @@ const App: React.FC = () => {
                 {isSyncing ? 'Pushing...' : syncStatus === 'success' ? 'Synced!' : 'Cloud Save'}
               </button>
             </div>
+            
+            <p className="text-[10px] text-slate-600 font-bold text-center uppercase tracking-widest pt-2">
+              created by syamim with <span className="text-pink-500">❤️</span>
+            </p>
           </div>
         </div>
       </aside>
@@ -336,14 +465,10 @@ const App: React.FC = () => {
           <header className="bg-white/70 backdrop-blur-xl border border-white rounded-[2rem] px-8 py-5 flex flex-col sm:flex-row justify-between items-center gap-5 shadow-sm mb-6 flex-shrink-0">
             <div>
               <h2 className="text-2xl font-black text-slate-800 tracking-tight">{activeTab === 'overview' ? 'Real-time Stats' : 'Manage Stock'}</h2>
-              <div className="flex items-center gap-2 mt-1">
-                <div className="w-2 h-2 rounded-full bg-pink-500 animate-pulse"></div>
-                <p className="text-slate-400 text-xs font-bold uppercase tracking-widest">AI Categorization Active</p>
-              </div>
             </div>
             <div className="flex items-center gap-3">
               <button onClick={handleLoadSample} className="px-5 py-3 bg-pink-50 hover:bg-pink-100 text-pink-600 rounded-2xl transition-all font-bold text-sm flex items-center gap-2 border border-pink-100 shadow-sm"><RefreshCw className="w-4 h-4" />Sample</button>
-              <button onClick={exportToCSV} disabled={items.length === 0} className="px-5 py-3 bg-white border border-slate-200 hover:border-pink-300 hover:bg-pink-50 text-slate-700 hover:text-pink-600 rounded-2xl transition-all font-bold text-sm flex items-center gap-2 shadow-sm disabled:opacity-50"><Download className="w-4 h-4" />Export CSV</button>
+              <button onClick={() => setIsExportModalOpen(true)} disabled={items.length === 0} className="px-5 py-3 bg-white border border-slate-200 hover:border-pink-300 hover:bg-pink-50 text-slate-700 hover:text-pink-600 rounded-2xl transition-all font-bold text-sm flex items-center gap-2 shadow-sm disabled:opacity-50"><Download className="w-4 h-4" />Export CSV</button>
               <label className="flex items-center gap-2 px-6 py-3 bg-slate-900 hover:bg-pink-600 text-white rounded-2xl cursor-pointer transition-all shadow-xl shadow-slate-900/10 font-bold text-sm">
                 <FileUp className="w-4 h-4" />Import <input type="file" className="hidden" accept=".csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) { const r = new FileReader(); r.onload = (e) => processCSV(e.target?.result as string); r.readAsText(f); } }} />
               </label>
@@ -357,8 +482,8 @@ const App: React.FC = () => {
                   <div className="absolute inset-0 bg-pink-500 blur-3xl opacity-20 animate-pulse"></div>
                   <div className="relative bg-white p-10 rounded-[3rem] shadow-2xl border border-pink-50"><Sparkles className="w-12 h-12 text-pink-500" /></div>
                 </div>
-                <h3 className="text-3xl font-black text-slate-800 mb-4 tracking-tight">Organize Your Inventory with AI</h3>
-                <p className="text-slate-500 mb-10 leading-relaxed text-lg font-medium">Upload a messy CSV of automotive parts. Gemini AI will scan part numbers and descriptions to categorize them automatically.</p>
+                <h3 className="text-3xl font-black text-slate-800 mb-4 tracking-tight">Organize Your Inventory</h3>
+                <p className="text-slate-500 mb-10 leading-relaxed text-lg font-medium">Upload a CSV of automotive parts. The system will scan part numbers and descriptions to categorize them automatically.</p>
                 <div className="flex flex-col sm:flex-row gap-4 w-full justify-center">
                   <button onClick={handleLoadSample} className="px-8 py-4 bg-white border-2 border-slate-100 text-slate-700 font-black rounded-[1.5rem] hover:border-pink-200 hover:bg-pink-50 transition-all shadow-md">Try with Sample Data</button>
                   <label className="px-8 py-4 bg-pink-600 text-white font-black rounded-[1.5rem] hover:bg-pink-700 transition-all shadow-xl shadow-pink-600/20 cursor-pointer text-center">Upload CSV File <input type="file" className="hidden" accept=".csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) { const r = new FileReader(); r.onload = (e) => processCSV(e.target?.result as string); r.readAsText(f); } }} /></label>
@@ -436,7 +561,7 @@ const App: React.FC = () => {
                     </div>
                     <div className="flex-1 overflow-y-auto">
                       <table className="w-full text-left table-fixed min-w-[800px]">
-                        <thead className="sticky top-0 bg-white z-10"><tr className="text-slate-400 text-[10px] uppercase tracking-[0.3em] font-black border-b border-pink-50 shadow-sm"><th className="px-10 py-7 w-48">SKU Code</th><th className="px-10 py-7">Description</th><th className="px-10 py-7 w-64">AI Label</th><th className="px-10 py-7 w-32 text-right">Qty</th></tr></thead>
+                        <thead className="sticky top-0 bg-white z-10"><tr className="text-slate-400 text-[10px] uppercase tracking-[0.3em] font-black border-b border-pink-50 shadow-sm"><th className="px-10 py-7 w-48">SKU Code</th><th className="px-10 py-7">Description</th><th className="px-10 py-7 w-64">Category</th><th className="px-10 py-7 w-32 text-right">Qty</th></tr></thead>
                         <tbody className="divide-y divide-pink-50">{paginatedItems.map(item => (
                           <tr key={item.id} className="hover:bg-pink-50/20 transition-colors group">
                             <td className="px-10 py-6 font-mono text-[11px] text-pink-600 font-black tracking-tight">{item.code}</td>
