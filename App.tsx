@@ -25,7 +25,10 @@ import {
   FileText,
   Layers,
   X,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Menu,
+  CheckSquare,
+  Square
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -83,6 +86,9 @@ const App: React.FC = () => {
   const [selectedCategory, setSelectedCategory] = useState<string>("All");
   const [currentPage, setCurrentPage] = useState(1);
   
+  // Selection State
+  const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
+
   // Sync States
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -96,12 +102,16 @@ const App: React.FC = () => {
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [exportFormat, setExportFormat] = useState<'standard' | 'categorized'>('standard');
 
+  // Mobile Menu State
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+
   useEffect(() => {
     localStorage.setItem('gh_config', JSON.stringify(ghConfig));
   }, [ghConfig]);
 
   useEffect(() => {
     setCurrentPage(1);
+    setSelectedItems(new Set()); // Clear selection on filter change
   }, [searchTerm, selectedCategory]);
 
   const processCSV = (text: string) => {
@@ -143,6 +153,18 @@ const App: React.FC = () => {
 
   const handleCategoryChange = (id: string, newCategory: ItemCategory) => {
     setItems(prev => prev.map(item => item.id === id ? { ...item, category: newCategory } : item));
+  };
+
+  const handleBulkCategoryChange = (newCategory: ItemCategory) => {
+    setItems(prev => prev.map(item => selectedItems.has(item.id) ? { ...item, category: newCategory } : item));
+    setSelectedItems(new Set()); // Clear selection after update
+  };
+
+  const toggleSelection = (id: string) => {
+    const newSet = new Set(selectedItems);
+    if (newSet.has(id)) newSet.delete(id);
+    else newSet.add(id);
+    setSelectedItems(newSet);
   };
 
   const generateStandardCSV = () => {
@@ -311,6 +333,11 @@ const App: React.FC = () => {
     processCSV(sample);
   };
 
+  const handleTabChange = (tab: 'overview' | 'inventory') => {
+    setActiveTab(tab);
+    setIsMobileMenuOpen(false); // Auto close menu on selection
+  };
+
   const stats: CategoryStat[] = useMemo(() => {
     const map = new Map<ItemCategory, { count: number; totalQty: number }>();
     items.forEach(item => {
@@ -334,8 +361,62 @@ const App: React.FC = () => {
     return filteredItems.slice(start, start + ITEMS_PER_PAGE);
   }, [filteredItems, currentPage]);
 
+  const isAllSelected = paginatedItems.length > 0 && paginatedItems.every(i => selectedItems.has(i.id));
+
+  const toggleAll = () => {
+    const newSet = new Set(selectedItems);
+    if (isAllSelected) {
+      paginatedItems.forEach(i => newSet.delete(i.id));
+    } else {
+      paginatedItems.forEach(i => newSet.add(i.id));
+    }
+    setSelectedItems(newSet);
+  };
+
   return (
-    <div className="h-screen w-full flex flex-col md:flex-row bg-[#fff1f5] font-['Inter'] overflow-hidden">
+    <div className="h-screen w-full flex bg-[#fff1f5] font-['Inter'] overflow-hidden">
+      {/* Mobile Menu Overlay */}
+      {isMobileMenuOpen && (
+        <div 
+          className="fixed inset-0 bg-pink-900/30 backdrop-blur-sm z-40 lg:hidden animate-in fade-in duration-200"
+          onClick={() => setIsMobileMenuOpen(false)}
+        />
+      )}
+
+      {/* Bulk Action Bar */}
+      {selectedItems.size > 0 && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] animate-in slide-in-from-bottom-10 fade-in duration-300">
+          <div className="bg-slate-900 text-white rounded-2xl shadow-2xl p-4 flex items-center gap-4 border border-white/10 pr-6">
+            <div className="bg-pink-600 px-3 py-1.5 rounded-lg text-xs font-black uppercase tracking-wider">
+              {selectedItems.size} Selected
+            </div>
+            <div className="h-6 w-px bg-slate-700"></div>
+            <div className="flex items-center gap-3">
+              <span className="text-sm font-medium text-slate-300">Move to:</span>
+              <div className="relative group/bulk">
+                 <select 
+                    className="appearance-none bg-slate-800 border border-slate-700 hover:border-pink-500 rounded-xl px-4 py-2 pr-10 text-sm font-bold focus:ring-2 focus:ring-pink-500/50 outline-none transition-all cursor-pointer"
+                    onChange={(e) => {
+                      if (e.target.value) handleBulkCategoryChange(e.target.value as ItemCategory);
+                    }}
+                    value=""
+                 >
+                    <option value="" disabled>Choose Category...</option>
+                    {Object.values(ItemCategory).map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                 </select>
+                 <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+              </div>
+            </div>
+            <button 
+              onClick={() => setSelectedItems(new Set())}
+              className="ml-2 p-2 hover:bg-white/10 rounded-xl text-slate-400 hover:text-white transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Settings Modal */}
       {isSyncModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-pink-900/40 backdrop-blur-sm p-4">
@@ -419,9 +500,25 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* Floating Sidebar Design */}
-      <aside className="w-full md:w-80 p-6 flex-shrink-0 flex flex-col">
-        <div className="flex-1 bg-slate-900 text-white rounded-[2.5rem] shadow-2xl flex flex-col overflow-hidden relative border border-white/5">
+      {/* Floating Sidebar Design - Responsive Drawer */}
+      <aside className={`
+        fixed inset-y-0 left-0 z-50 w-80 flex flex-col 
+        transform transition-transform duration-300 ease-in-out
+        lg:relative lg:translate-x-0
+        ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}
+      `}>
+        {/* Mobile Sidebar Background Handler (hidden on desktop) */}
+        <div className="absolute inset-0 bg-[#fff1f5] lg:hidden -z-10" />
+
+        <div className="flex-1 bg-slate-900 text-white flex flex-col overflow-hidden relative border-r border-white/5">
+          {/* Close Button for Mobile */}
+          <button 
+            onClick={() => setIsMobileMenuOpen(false)}
+            className="absolute top-6 right-6 lg:hidden p-2 text-slate-400 hover:text-white transition-colors bg-white/10 rounded-full"
+          >
+            <X className="w-5 h-5" />
+          </button>
+
           <div className="p-8">
             <div className="flex items-center gap-3 mb-10">
               <div className="bg-gradient-to-br from-pink-400 to-rose-600 p-2.5 rounded-2xl shadow-lg shadow-pink-500/20">
@@ -432,10 +529,10 @@ const App: React.FC = () => {
               </h1>
             </div>
             <nav className="space-y-2">
-              <button onClick={() => setActiveTab('overview')} className={`w-full flex items-center gap-3.5 px-5 py-4 rounded-2xl transition-all duration-300 ${activeTab === 'overview' ? 'bg-gradient-to-r from-pink-600 to-rose-600 text-white shadow-xl shadow-pink-600/30' : 'text-slate-400 hover:text-white hover:bg-white/10'}`}>
+              <button onClick={() => handleTabChange('overview')} className={`w-full flex items-center gap-3.5 px-5 py-4 rounded-2xl transition-all duration-300 ${activeTab === 'overview' ? 'bg-gradient-to-r from-pink-600 to-rose-600 text-white shadow-xl shadow-pink-600/30' : 'text-slate-400 hover:text-white hover:bg-white/10'}`}>
                 <LayoutDashboard className="w-5 h-5" /> <span className="font-semibold text-sm">Dashboard</span>
               </button>
-              <button onClick={() => setActiveTab('inventory')} className={`w-full flex items-center gap-3.5 px-5 py-4 rounded-2xl transition-all duration-300 ${activeTab === 'inventory' ? 'bg-gradient-to-r from-pink-600 to-rose-600 text-white shadow-xl shadow-pink-600/30' : 'text-slate-400 hover:text-white hover:bg-white/10'}`}>
+              <button onClick={() => handleTabChange('inventory')} className={`w-full flex items-center gap-3.5 px-5 py-4 rounded-2xl transition-all duration-300 ${activeTab === 'inventory' ? 'bg-gradient-to-r from-pink-600 to-rose-600 text-white shadow-xl shadow-pink-600/30' : 'text-slate-400 hover:text-white hover:bg-white/10'}`}>
                 <ListFilter className="w-5 h-5" /> <span className="font-semibold text-sm">Inventory</span>
               </button>
             </nav>
@@ -445,7 +542,7 @@ const App: React.FC = () => {
             <div className="p-5 bg-white/5 rounded-3xl border border-white/10">
               <div className="flex justify-between items-center mb-4">
                 <p className="text-[10px] text-pink-400 uppercase tracking-[0.2em] font-black">Sync Engine</p>
-                <button onClick={() => setIsSyncModalOpen(true)} className="p-1.5 hover:bg-white/10 rounded-xl transition-all text-slate-400"><Settings className="w-3.5 h-3.5" /></button>
+                <button onClick={() => { setIsMobileMenuOpen(false); setIsSyncModalOpen(true); }} className="p-1.5 hover:bg-white/10 rounded-xl transition-all text-slate-400"><Settings className="w-3.5 h-3.5" /></button>
               </div>
               <button onClick={syncToGitHub} disabled={items.length === 0 || isSyncing} className={`w-full flex items-center justify-center gap-2.5 py-3 rounded-2xl text-[11px] font-bold transition-all ${syncStatus === 'success' ? 'bg-emerald-500' : syncStatus === 'error' ? 'bg-rose-500' : 'bg-white/10 hover:bg-white/20'} text-white disabled:opacity-50`}>
                 {isSyncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : syncStatus === 'success' ? <Check className="w-3.5 h-3.5" /> : <Github className="w-3.5 h-3.5" />}
@@ -460,17 +557,23 @@ const App: React.FC = () => {
         </div>
       </aside>
 
-      <main className="flex-1 min-w-0 p-6 md:pl-0 h-full">
+      <main className="flex-1 min-w-0 p-4 md:p-6 lg:pl-0 h-full">
         <div className="h-full flex flex-col">
-          <header className="bg-white/70 backdrop-blur-xl border border-white rounded-[2rem] px-8 py-5 flex flex-col sm:flex-row justify-between items-center gap-5 shadow-sm mb-6 flex-shrink-0">
-            <div>
+          <header className="bg-white/70 backdrop-blur-xl border border-white rounded-[2rem] px-6 py-5 flex flex-col sm:flex-row justify-between items-center gap-5 shadow-sm mb-6 flex-shrink-0">
+            <div className="flex items-center gap-4 w-full sm:w-auto">
+              <button 
+                onClick={() => setIsMobileMenuOpen(true)}
+                className="lg:hidden p-2 -ml-2 text-slate-500 hover:bg-pink-50 hover:text-pink-600 rounded-xl transition-colors"
+              >
+                <Menu className="w-6 h-6" />
+              </button>
               <h2 className="text-2xl font-black text-slate-800 tracking-tight">{activeTab === 'overview' ? 'Real-time Stats' : 'Manage Stock'}</h2>
             </div>
-            <div className="flex items-center gap-3">
-              <button onClick={handleLoadSample} className="px-5 py-3 bg-pink-50 hover:bg-pink-100 text-pink-600 rounded-2xl transition-all font-bold text-sm flex items-center gap-2 border border-pink-100 shadow-sm"><RefreshCw className="w-4 h-4" />Sample</button>
-              <button onClick={() => setIsExportModalOpen(true)} disabled={items.length === 0} className="px-5 py-3 bg-white border border-slate-200 hover:border-pink-300 hover:bg-pink-50 text-slate-700 hover:text-pink-600 rounded-2xl transition-all font-bold text-sm flex items-center gap-2 shadow-sm disabled:opacity-50"><Download className="w-4 h-4" />Export CSV</button>
-              <label className="flex items-center gap-2 px-6 py-3 bg-slate-900 hover:bg-pink-600 text-white rounded-2xl cursor-pointer transition-all shadow-xl shadow-slate-900/10 font-bold text-sm">
-                <FileUp className="w-4 h-4" />Import <input type="file" className="hidden" accept=".csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) { const r = new FileReader(); r.onload = (e) => processCSV(e.target?.result as string); r.readAsText(f); } }} />
+            <div className="flex items-center gap-3 w-full sm:w-auto justify-end">
+              <button onClick={handleLoadSample} className="px-4 py-3 bg-pink-50 hover:bg-pink-100 text-pink-600 rounded-2xl transition-all font-bold text-sm flex items-center gap-2 border border-pink-100 shadow-sm whitespace-nowrap"><RefreshCw className="w-4 h-4" /><span className="hidden sm:inline">Sample</span></button>
+              <button onClick={() => setIsExportModalOpen(true)} disabled={items.length === 0} className="px-4 py-3 bg-white border border-slate-200 hover:border-pink-300 hover:bg-pink-50 text-slate-700 hover:text-pink-600 rounded-2xl transition-all font-bold text-sm flex items-center gap-2 shadow-sm disabled:opacity-50 whitespace-nowrap"><Download className="w-4 h-4" /><span className="hidden sm:inline">Export</span></button>
+              <label className="flex items-center gap-2 px-6 py-3 bg-slate-900 hover:bg-pink-600 text-white rounded-2xl cursor-pointer transition-all shadow-xl shadow-slate-900/10 font-bold text-sm whitespace-nowrap">
+                <FileUp className="w-4 h-4" /><span className="hidden sm:inline">Import</span> <input type="file" className="hidden" accept=".csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) { const r = new FileReader(); r.onload = (e) => processCSV(e.target?.result as string); r.readAsText(f); } }} />
               </label>
             </div>
           </header>
@@ -550,7 +653,7 @@ const App: React.FC = () => {
                         <Search className="absolute left-6 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-pink-500 transition-colors" />
                         <input type="text" placeholder="Search part codes, names..." className="w-full pl-14 pr-8 py-5 bg-white border-2 border-slate-100 rounded-[1.5rem] focus:ring-4 focus:ring-pink-500/10 focus:border-pink-500 outline-none transition-all text-sm font-bold shadow-sm" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
                       </div>
-                      <div className="relative min-w-[280px]">
+                      <div className="relative min-w-[200px] sm:min-w-[280px]">
                         <Filter className="absolute left-6 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                         <select className="w-full pl-14 pr-12 py-5 bg-white border-2 border-slate-100 rounded-[1.5rem] focus:ring-4 focus:ring-pink-500/10 focus:border-pink-500 outline-none appearance-none transition-all text-sm font-black text-slate-700 shadow-sm" value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)}>
                           <option value="All">All Categories</option>
@@ -561,10 +664,33 @@ const App: React.FC = () => {
                     </div>
                     <div className="flex-1 overflow-y-auto">
                       <table className="w-full text-left table-fixed min-w-[800px]">
-                        <thead className="sticky top-0 bg-white z-10"><tr className="text-slate-400 text-[10px] uppercase tracking-[0.3em] font-black border-b border-pink-50 shadow-sm"><th className="px-10 py-7 w-48">SKU Code</th><th className="px-10 py-7">Description</th><th className="px-10 py-7 w-64">Category</th><th className="px-10 py-7 w-32 text-right">Qty</th></tr></thead>
+                        <thead className="sticky top-0 bg-white z-10">
+                          <tr className="text-slate-400 text-[10px] uppercase tracking-[0.3em] font-black border-b border-pink-50 shadow-sm">
+                            <th className="pl-10 pr-4 py-7 w-16">
+                              <button 
+                                onClick={toggleAll}
+                                className={`w-5 h-5 rounded-lg border-2 flex items-center justify-center transition-all ${isAllSelected ? 'bg-pink-600 border-pink-600' : 'border-slate-300 hover:border-pink-400'}`}
+                              >
+                                {isAllSelected && <Check className="w-3.5 h-3.5 text-white" />}
+                              </button>
+                            </th>
+                            <th className="px-4 py-7 w-48">SKU Code</th>
+                            <th className="px-10 py-7">Description</th>
+                            <th className="px-10 py-7 w-64">Category</th>
+                            <th className="px-10 py-7 w-32 text-right">Qty</th>
+                          </tr>
+                        </thead>
                         <tbody className="divide-y divide-pink-50">{paginatedItems.map(item => (
-                          <tr key={item.id} className="hover:bg-pink-50/20 transition-colors group">
-                            <td className="px-10 py-6 font-mono text-[11px] text-pink-600 font-black tracking-tight">{item.code}</td>
+                          <tr key={item.id} className={`transition-colors group ${selectedItems.has(item.id) ? 'bg-pink-50/60 hover:bg-pink-100/60' : 'hover:bg-pink-50/20'}`}>
+                            <td className="pl-10 pr-4 py-6">
+                              <button 
+                                onClick={() => toggleSelection(item.id)}
+                                className={`w-5 h-5 rounded-lg border-2 flex items-center justify-center transition-all ${selectedItems.has(item.id) ? 'bg-pink-600 border-pink-600' : 'border-slate-200 group-hover:border-pink-300'}`}
+                              >
+                                {selectedItems.has(item.id) && <Check className="w-3.5 h-3.5 text-white" />}
+                              </button>
+                            </td>
+                            <td className="px-4 py-6 font-mono text-[11px] text-pink-600 font-black tracking-tight">{item.code}</td>
                             <td className="px-10 py-6"><p className="text-sm font-bold text-slate-800 line-clamp-2 leading-relaxed">{item.description}</p></td>
                             <td className="px-10 py-6">
                               <div className="relative group/sel">
