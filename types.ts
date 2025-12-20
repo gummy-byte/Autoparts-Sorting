@@ -28,4 +28,6 @@ export interface CategoryStat {
   name: string;
   count: number;
   totalQty: number;
+  // Add index signature for compatibility with charting libraries like Recharts
+  [key: string]: string | number;
 }
