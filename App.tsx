@@ -28,7 +28,9 @@ import {
   FileSpreadsheet,
   Menu,
   CheckSquare,
-  Square
+  Square,
+  Plus,
+  Tag
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -86,6 +88,14 @@ const App: React.FC = () => {
   const [selectedCategory, setSelectedCategory] = useState<string>("All");
   const [currentPage, setCurrentPage] = useState(1);
   
+  // Dynamic Categories State
+  const [availableCategories, setAvailableCategories] = useState<string[]>(Object.values(ItemCategory));
+  
+  // Category Creation Modal State
+  const [isAddCategoryModalOpen, setIsAddCategoryModalOpen] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [categoryTarget, setCategoryTarget] = useState<{ type: 'single' | 'bulk', id?: string } | null>(null);
+
   // Selection State
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
 
@@ -118,21 +128,29 @@ const App: React.FC = () => {
     const lines = text.split(/\r?\n/).filter(line => line.trim().length > 0);
     if (lines.length === 0) return;
 
-    let qtyIdx = -1, codeIdx = -1, descIdx = -1, headerLineIdx = -1;
+    let qtyIdx = -1, codeIdx = -1, descIdx = -1, catIdx = -1, headerLineIdx = -1;
+    
+    // Find header row and column indices
     for (let i = 0; i < Math.min(lines.length, 10); i++) {
       const parts = parseCSVLine(lines[i]).map(p => p.toLowerCase());
       const fQty = parts.findIndex(p => p.includes('qty') || p.includes('quantity') || p === 'q');
       const fCode = parts.findIndex(p => p.includes('code') || p.includes('part') || p.includes('sku'));
       const fDesc = parts.findIndex(p => p.includes('desc') || p.includes('item') || p.includes('name'));
+      const fCat = parts.findIndex(p => p.includes('category') || p.includes('type') || p.includes('group') || p === 'cat');
 
       if ((fQty !== -1 && fCode !== -1) || (fQty !== -1 && fDesc !== -1) || (fCode !== -1 && fDesc !== -1)) {
-        qtyIdx = fQty; codeIdx = fCode; descIdx = fDesc; headerLineIdx = i; break;
+        qtyIdx = fQty; codeIdx = fCode; descIdx = fDesc; catIdx = fCat; headerLineIdx = i; break;
       }
     }
 
-    if (headerLineIdx === -1) { qtyIdx = 0; codeIdx = 1; descIdx = 2; headerLineIdx = -1; }
+    if (headerLineIdx === -1) { 
+      qtyIdx = 0; codeIdx = 1; descIdx = 2; headerLineIdx = -1; 
+      // Keep catIdx as -1 if we couldn't determine header, assuming no category column
+    }
 
     const parsedItems: InventoryItem[] = [];
+    const newCategories = new Set<string>();
+
     for (let i = headerLineIdx + 1; i < lines.length; i++) {
       const parts = parseCSVLine(lines[i]);
       if (parts.length < 2) continue;
@@ -140,24 +158,79 @@ const App: React.FC = () => {
       const code = codeIdx !== -1 ? parts[codeIdx] : "N/A";
       const description = descIdx !== -1 ? parts[descIdx] : "No Description";
       
+      let category = "";
+      if (catIdx !== -1 && parts[catIdx]) {
+        category = parts[catIdx].trim();
+      }
+
+      // If category is empty or "null" string, use classifier
+      if (!category || category.toLowerCase() === 'null') {
+        category = classifyItem(description);
+      } else {
+        // If we found a category in CSV, ensure it's added to our available categories
+        if (category.trim()) newCategories.add(category.trim());
+      }
+      
       parsedItems.push({
         id: `${code}-${i}-${Math.random().toString(36).substr(2, 5)}`,
         qty,
         code: code || "UNKNOWN",
         description: description || "Untitled Part",
-        category: classifyItem(description)
+        category
       });
     }
+
+    // Update available categories with any new ones found
+    if (newCategories.size > 0) {
+      setAvailableCategories(prev => {
+        const combined = new Set([...prev, ...Array.from(newCategories)]);
+        return Array.from(combined).sort();
+      });
+    }
+
     setItems(parsedItems);
   };
 
-  const handleCategoryChange = (id: string, newCategory: ItemCategory) => {
-    setItems(prev => prev.map(item => item.id === id ? { ...item, category: newCategory } : item));
+  const openAddCategoryModal = (type: 'single' | 'bulk', id?: string) => {
+    setCategoryTarget({ type, id });
+    setNewCategoryName("");
+    setIsAddCategoryModalOpen(true);
   };
 
-  const handleBulkCategoryChange = (newCategory: ItemCategory) => {
-    setItems(prev => prev.map(item => selectedItems.has(item.id) ? { ...item, category: newCategory } : item));
-    setSelectedItems(new Set()); // Clear selection after update
+  const handleConfirmAddCategory = () => {
+    if (!newCategoryName.trim()) return;
+    const name = newCategoryName.trim();
+    
+    setAvailableCategories(prev => {
+      if (prev.includes(name)) return prev;
+      return [...prev, name].sort();
+    });
+
+    if (categoryTarget?.type === 'bulk') {
+        setItems(prev => prev.map(item => selectedItems.has(item.id) ? { ...item, category: name } : item));
+        setSelectedItems(new Set());
+    } else if (categoryTarget?.type === 'single' && categoryTarget.id) {
+        setItems(prev => prev.map(item => item.id === categoryTarget.id ? { ...item, category: name } : item));
+    }
+
+    setIsAddCategoryModalOpen(false);
+  };
+
+  const handleCategoryChange = (id: string, newCategory: string) => {
+    if (newCategory === '__NEW__') {
+      openAddCategoryModal('single', id);
+    } else {
+      setItems(prev => prev.map(item => item.id === id ? { ...item, category: newCategory } : item));
+    }
+  };
+
+  const handleBulkCategoryChange = (newCategory: string) => {
+    if (newCategory === '__NEW__') {
+      openAddCategoryModal('bulk');
+    } else {
+      setItems(prev => prev.map(item => selectedItems.has(item.id) ? { ...item, category: newCategory } : item));
+      setSelectedItems(new Set());
+    }
   };
 
   const toggleSelection = (id: string) => {
@@ -318,18 +391,18 @@ const App: React.FC = () => {
   };
 
   const handleLoadSample = () => {
-    const sample = `Qty,Code,Item Description
-2,(AC) 315143,BLOWER MOTOR TOYOTA UNSER/AVANZA (RL)
-0,(AC)2850,CABIN FILTER TOYOTA INNOVA/ESTIMA
-15,(AC)CFMY,CABIN FILTER PERODUA ALZA/MYVI BEST/AXIA (120010)
-0,03C115561J,03C115561J (UNKNOWN DESC)
-1,2105,CVT OIL TOYOTA TC 4L INC L.C
-7,11193-97201,PLUG SEAL SET KELISA 1.0
-4,11427508969,OIL FILTER BMW E46 2.0
-2,08269-P9908ZT3,CVT OIL HONDA CVTF 3.5L INC L.C
-1,11302-87Z03,TIMING COVER PERODUA MYVI KENARI KELISA INC L.C
-3,17220-RNA-000,AIR FILTER HONDA CIVIC 1.8
-6,GDB7707,BRAKE PAD (F) PROTON SAGA BLM/FLX INC L.C -TRW-`;
+    const sample = `Qty,Code,Item Description,Category
+2,(AC) 315143,BLOWER MOTOR TOYOTA UNSER/AVANZA (RL),
+0,(AC)2850,CABIN FILTER TOYOTA INNOVA/ESTIMA,Cabin Filter
+15,(AC)CFMY,CABIN FILTER PERODUA ALZA/MYVI BEST/AXIA (120010),
+0,03C115561J,03C115561J (UNKNOWN DESC),Unknown
+1,2105,CVT OIL TOYOTA TC 4L INC L.C,Fluids & Oils
+7,11193-97201,PLUG SEAL SET KELISA 1.0,
+4,11427508969,OIL FILTER BMW E46 2.0,Oil Filter
+2,08269-P9908ZT3,CVT OIL HONDA CVTF 3.5L INC L.C,Fluids & Oils
+1,11302-87Z03,TIMING COVER PERODUA MYVI KENARI KELISA INC L.C,Engine Parts
+3,17220-RNA-000,AIR FILTER HONDA CIVIC 1.8,
+6,GDB7707,BRAKE PAD (F) PROTON SAGA BLM/FLX INC L.C -TRW-,Brakes`;
     processCSV(sample);
   };
 
@@ -339,7 +412,7 @@ const App: React.FC = () => {
   };
 
   const stats: CategoryStat[] = useMemo(() => {
-    const map = new Map<ItemCategory, { count: number; totalQty: number }>();
+    const map = new Map<string, { count: number; totalQty: number }>();
     items.forEach(item => {
       const current = map.get(item.category) || { count: 0, totalQty: 0 };
       map.set(item.category, { count: current.count + 1, totalQty: current.totalQty + item.qty });
@@ -383,6 +456,36 @@ const App: React.FC = () => {
         />
       )}
 
+      {/* Add Category Modal */}
+      {isAddCategoryModalOpen && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+           <div className="bg-white rounded-3xl w-full max-w-sm p-6 shadow-2xl border border-pink-100 transform transition-all scale-100">
+             <div className="flex justify-between items-center mb-6">
+               <h3 className="text-lg font-black text-slate-800 flex items-center gap-2"><Tag className="w-5 h-5 text-pink-500" /> New Category</h3>
+               <button onClick={() => setIsAddCategoryModalOpen(false)} className="text-slate-400 hover:text-slate-600 p-1 rounded-full hover:bg-slate-50"><X className="w-5 h-5" /></button>
+             </div>
+             
+             <div className="mb-6">
+               <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Category Name</label>
+               <input 
+                 autoFocus
+                 type="text" 
+                 value={newCategoryName}
+                 onChange={(e) => setNewCategoryName(e.target.value)}
+                 onKeyDown={(e) => e.key === 'Enter' && handleConfirmAddCategory()}
+                 placeholder="e.g., Transmission"
+                 className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-pink-500/20 focus:border-pink-500 outline-none font-bold text-slate-800 placeholder:font-normal placeholder:text-slate-400"
+               />
+             </div>
+
+             <div className="flex gap-3">
+               <button onClick={() => setIsAddCategoryModalOpen(false)} className="flex-1 py-3 text-slate-500 font-bold hover:bg-slate-50 rounded-xl transition-all text-sm">Cancel</button>
+               <button onClick={handleConfirmAddCategory} className="flex-[2] py-3 bg-pink-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-pink-600/20 hover:bg-pink-700 text-sm">Create & Apply</button>
+             </div>
+           </div>
+        </div>
+      )}
+
       {/* Bulk Action Bar */}
       {selectedItems.size > 0 && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] animate-in slide-in-from-bottom-10 fade-in duration-300">
@@ -397,12 +500,13 @@ const App: React.FC = () => {
                  <select 
                     className="appearance-none bg-slate-800 border border-slate-700 hover:border-pink-500 rounded-xl px-4 py-2 pr-10 text-sm font-bold focus:ring-2 focus:ring-pink-500/50 outline-none transition-all cursor-pointer"
                     onChange={(e) => {
-                      if (e.target.value) handleBulkCategoryChange(e.target.value as ItemCategory);
+                      if (e.target.value) handleBulkCategoryChange(e.target.value);
                     }}
                     value=""
                  >
                     <option value="" disabled>Choose Category...</option>
-                    {Object.values(ItemCategory).map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                    {availableCategories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                    <option value="__NEW__" className="text-pink-400 font-bold">+ Create New Category</option>
                  </select>
                  <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
               </div>
@@ -500,11 +604,11 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* Floating Sidebar Design - Responsive Drawer */}
+      {/* Floating Sidebar Design - Fixed on Desktop */}
       <aside className={`
         fixed inset-y-0 left-0 z-50 w-80 flex flex-col 
         transform transition-transform duration-300 ease-in-out
-        lg:relative lg:translate-x-0
+        lg:translate-x-0
         ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}
       `}>
         {/* Mobile Sidebar Background Handler (hidden on desktop) */}
@@ -557,7 +661,7 @@ const App: React.FC = () => {
         </div>
       </aside>
 
-      <main className="flex-1 min-w-0 p-4 md:p-6 lg:pl-0 h-full">
+      <main className="flex-1 min-w-0 p-4 md:p-6 lg:ml-80 h-full transition-all duration-300">
         <div className="h-full flex flex-col">
           <header className="bg-white/70 backdrop-blur-xl border border-white rounded-[2rem] px-6 py-5 flex flex-col sm:flex-row justify-between items-center gap-5 shadow-sm mb-6 flex-shrink-0">
             <div className="flex items-center gap-4 w-full sm:w-auto">
@@ -657,7 +761,7 @@ const App: React.FC = () => {
                         <Filter className="absolute left-6 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                         <select className="w-full pl-14 pr-12 py-5 bg-white border-2 border-slate-100 rounded-[1.5rem] focus:ring-4 focus:ring-pink-500/10 focus:border-pink-500 outline-none appearance-none transition-all text-sm font-black text-slate-700 shadow-sm" value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)}>
                           <option value="All">All Categories</option>
-                          {Object.values(ItemCategory).map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                          {availableCategories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
                         </select>
                         <ChevronDown className="absolute right-6 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
                       </div>
@@ -694,8 +798,13 @@ const App: React.FC = () => {
                             <td className="px-10 py-6"><p className="text-sm font-bold text-slate-800 line-clamp-2 leading-relaxed">{item.description}</p></td>
                             <td className="px-10 py-6">
                               <div className="relative group/sel">
-                                <select value={item.category} onChange={(e) => handleCategoryChange(item.id, e.target.value as ItemCategory)} className="w-full bg-pink-50/50 hover:bg-white hover:ring-2 hover:ring-pink-500/20 text-pink-700 text-[11px] font-black uppercase tracking-wider px-4 py-2.5 rounded-2xl appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-pink-500 transition-all border border-transparent hover:border-pink-100 shadow-sm">
-                                  {Object.values(ItemCategory).map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                                <select 
+                                  value={item.category} 
+                                  onChange={(e) => handleCategoryChange(item.id, e.target.value)} 
+                                  className="w-full bg-pink-50/50 hover:bg-white hover:ring-2 hover:ring-pink-500/20 text-pink-700 text-[11px] font-black uppercase tracking-wider px-4 py-2.5 rounded-2xl appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-pink-500 transition-all border border-transparent hover:border-pink-100 shadow-sm"
+                                >
+                                  {availableCategories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                                  <option value="__NEW__" className="text-pink-400 font-bold">+ New Category</option>
                                 </select>
                                 <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-pink-400 pointer-events-none group-hover/sel:text-pink-600" />
                               </div>

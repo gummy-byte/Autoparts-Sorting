@@ -4,7 +4,7 @@ export interface InventoryItem {
   qty: number;
   code: string;
   description: string;
-  category: ItemCategory;
+  category: string;
 }
 
 export enum ItemCategory {
