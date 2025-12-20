@@ -14,7 +14,12 @@ import {
   CheckCircle2,
   Download,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  Github,
+  Settings,
+  Save,
+  Loader2,
+  Check
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -39,6 +44,13 @@ const COLORS = [
 ];
 
 const ITEMS_PER_PAGE = 15;
+
+interface GitHubConfig {
+  token: string;
+  repo: string; // e.g., "username/repo"
+  path: string; // e.g., "data/inventory.csv"
+  branch: string;
+}
 
 /**
  * Robust CSV Line Parser that handles quoted values containing commas
@@ -68,6 +80,19 @@ const App: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string>("All");
   const [currentPage, setCurrentPage] = useState(1);
+  
+  // GitHub Sync State
+  const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [ghConfig, setGhConfig] = useState<GitHubConfig>(() => {
+    const saved = localStorage.getItem('gh_config');
+    return saved ? JSON.parse(saved) : { token: '', repo: '', path: 'inventory_categorized.csv', branch: 'main' };
+  });
+
+  useEffect(() => {
+    localStorage.setItem('gh_config', JSON.stringify(ghConfig));
+  }, [ghConfig]);
 
   // Reset to first page when filters change
   useEffect(() => {
@@ -130,9 +155,7 @@ const App: React.FC = () => {
     ));
   };
 
-  const exportToCSV = () => {
-    if (items.length === 0) return;
-    
+  const generateCSVString = () => {
     const headers = ["Quantity", "Code", "Description", "Category"];
     const rows = items.map(item => [
       item.qty,
@@ -140,8 +163,12 @@ const App: React.FC = () => {
       `"${item.description.replace(/"/g, '""')}"`,
       `"${item.category}"`
     ]);
-    
-    const csvContent = [headers, ...rows].map(e => e.join(",")).join("\n");
+    return [headers, ...rows].map(e => e.join(",")).join("\n");
+  };
+
+  const exportToCSV = () => {
+    if (items.length === 0) return;
+    const csvContent = generateCSVString();
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     const url = URL.createObjectURL(blob);
@@ -151,6 +178,63 @@ const App: React.FC = () => {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+  };
+
+  const syncToGitHub = async () => {
+    if (!ghConfig.token || !ghConfig.repo || !ghConfig.path) {
+      setIsSyncModalOpen(true);
+      return;
+    }
+
+    setIsSyncing(true);
+    setSyncStatus('idle');
+
+    try {
+      const csvContent = generateCSVString();
+      const contentBase64 = btoa(unescape(encodeURIComponent(csvContent)));
+      
+      // 1. Check if file exists to get SHA
+      const getFileResponse = await fetch(`https://api.github.com/repos/${ghConfig.repo}/contents/${ghConfig.path}?ref=${ghConfig.branch}`, {
+        headers: {
+          'Authorization': `token ${ghConfig.token}`,
+          'Accept': 'application/vnd.github.v3+json'
+        }
+      });
+
+      let sha: string | undefined;
+      if (getFileResponse.status === 200) {
+        const fileData = await getFileResponse.json();
+        sha = fileData.sha;
+      }
+
+      // 2. Push content
+      const putResponse = await fetch(`https://api.github.com/repos/${ghConfig.repo}/contents/${ghConfig.path}`, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `token ${ghConfig.token}`,
+          'Accept': 'application/vnd.github.v3+json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          message: `Update inventory categorized: ${new Date().toLocaleString()}`,
+          content: contentBase64,
+          branch: ghConfig.branch,
+          sha: sha
+        })
+      });
+
+      if (putResponse.ok) {
+        setSyncStatus('success');
+        setTimeout(() => setSyncStatus('idle'), 3000);
+      } else {
+        throw new Error('Failed to push to GitHub');
+      }
+    } catch (error) {
+      console.error(error);
+      setSyncStatus('error');
+    } finally {
+      setIsSyncing(false);
+    }
   };
 
   const handleLoadSample = () => {
@@ -199,7 +283,6 @@ const App: React.FC = () => {
     });
   }, [items, searchTerm, selectedCategory]);
 
-  // Pagination Logic
   const totalPages = Math.ceil(filteredItems.length / ITEMS_PER_PAGE);
   const paginatedItems = useMemo(() => {
     const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
@@ -210,14 +293,95 @@ const App: React.FC = () => {
   const outOfStock = items.filter(i => i.qty <= 0).length;
 
   return (
-    <div className="min-h-screen flex flex-col md:flex-row">
+    <div className="min-h-screen flex flex-col md:flex-row relative">
+      {/* GitHub Sync Modal */}
+      {isSyncModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-3xl w-full max-w-md p-8 shadow-2xl animate-in fade-in zoom-in duration-200">
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+                <Github className="w-6 h-6" />
+                GitHub Sync Settings
+              </h3>
+              <button onClick={() => setIsSyncModalOpen(false)} className="text-slate-400 hover:text-slate-600">
+                <AlertCircle className="w-5 h-5 rotate-45" />
+              </button>
+            </div>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Personal Access Token</label>
+                <input 
+                  type="password" 
+                  placeholder="ghp_xxxxxxxxxxxx"
+                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:outline-none"
+                  value={ghConfig.token}
+                  onChange={(e) => setGhConfig({...ghConfig, token: e.target.value})}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Repository (owner/repo)</label>
+                <input 
+                  type="text" 
+                  placeholder="e.g. user123/my-inventory"
+                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:outline-none"
+                  value={ghConfig.repo}
+                  onChange={(e) => setGhConfig({...ghConfig, repo: e.target.value})}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Branch</label>
+                  <input 
+                    type="text" 
+                    placeholder="main"
+                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:outline-none"
+                    value={ghConfig.branch}
+                    onChange={(e) => setGhConfig({...ghConfig, branch: e.target.value})}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">File Path</label>
+                  <input 
+                    type="text" 
+                    placeholder="inventory.csv"
+                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:outline-none"
+                    value={ghConfig.path}
+                    onChange={(e) => setGhConfig({...ghConfig, path: e.target.value})}
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-8 flex gap-3">
+              <button 
+                onClick={() => setIsSyncModalOpen(false)}
+                className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold rounded-xl transition-all"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={() => {
+                  setIsSyncModalOpen(false);
+                  syncToGitHub();
+                }}
+                className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl transition-all shadow-lg shadow-blue-500/20 flex items-center justify-center gap-2"
+              >
+                <Save className="w-4 h-4" />
+                Save & Sync
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <aside className="w-full md:w-64 bg-slate-900 text-white flex-shrink-0">
         <div className="p-6">
           <div className="flex items-center gap-3 mb-8">
             <div className="bg-blue-500 p-2 rounded-lg">
               <Package className="w-6 h-6" />
             </div>
-            <h1 className="text-xl font-bold tracking-tight">AutoParts AI</h1>
+            <h1 className="text-xl font-bold tracking-tight">AutoParts Dash</h1>
           </div>
 
           <nav className="space-y-1">
@@ -232,16 +396,46 @@ const App: React.FC = () => {
           </nav>
         </div>
 
-        <div className="mt-auto p-6">
+        <div className="mt-auto p-6 space-y-3">
           <div className="bg-slate-800 rounded-2xl p-4 border border-slate-700">
-            <p className="text-xs text-slate-500 mb-2 uppercase tracking-wider font-semibold">Management Tools</p>
+            <div className="flex justify-between items-center mb-3">
+              <p className="text-[10px] text-slate-500 uppercase tracking-widest font-bold">Cloud Storage</p>
+              <button onClick={() => setIsSyncModalOpen(true)} className="p-1 hover:bg-slate-700 rounded-md transition-colors">
+                <Settings className="w-3 h-3 text-slate-400" />
+              </button>
+            </div>
+            
+            <button 
+              onClick={syncToGitHub}
+              disabled={items.length === 0 || isSyncing}
+              className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-xs font-bold transition-all relative overflow-hidden ${
+                syncStatus === 'success' ? 'bg-emerald-500 text-white' : 
+                syncStatus === 'error' ? 'bg-rose-500 text-white' : 
+                'bg-slate-700 hover:bg-slate-600 text-white'
+              } disabled:opacity-50`}
+            >
+              {isSyncing ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : syncStatus === 'success' ? (
+                <Check className="w-3 h-3" />
+              ) : syncStatus === 'error' ? (
+                <AlertCircle className="w-3 h-3" />
+              ) : (
+                <Github className="w-3 h-3" />
+              )}
+              {isSyncing ? 'Syncing...' : syncStatus === 'success' ? 'Synced!' : syncStatus === 'error' ? 'Error' : 'Save to GitHub'}
+            </button>
+          </div>
+
+          <div className="bg-slate-800 rounded-2xl p-4 border border-slate-700">
+            <p className="text-[10px] text-slate-500 uppercase tracking-widest font-bold mb-2">Local Actions</p>
             <button 
               onClick={exportToCSV}
               disabled={items.length === 0}
-              className="w-full flex items-center justify-center gap-2 py-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-xs font-bold transition-all"
+              className="w-full flex items-center justify-center gap-2 py-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 rounded-lg text-xs font-bold transition-all"
             >
               <Download className="w-3 h-3" />
-              Export Data
+              Export CSV
             </button>
           </div>
         </div>
@@ -253,7 +447,7 @@ const App: React.FC = () => {
             <h2 className="text-2xl font-bold text-slate-800">
               {activeTab === 'overview' ? 'Dashboard Summary' : 'Inventory Management'}
             </h2>
-            <p className="text-slate-500 text-sm">Review, Edit, and Export Inventory</p>
+            <p className="text-slate-500 text-sm">Review, Edit, and Push Changes to GitHub</p>
           </div>
 
           <div className="flex items-center gap-3">
@@ -285,8 +479,8 @@ const App: React.FC = () => {
               <div className="bg-blue-50 p-6 rounded-full mb-6">
                 <FileUp className="w-12 h-12 text-blue-500" />
               </div>
-              <h3 className="text-xl font-bold text-slate-800 mb-2">Automotive Categorization</h3>
-              <p className="text-slate-500 mb-8">Upload your CSV to instantly organize cabin filters, oil filters, brake pads, and more with our intelligent parsing engine.</p>
+              <h3 className="text-xl font-bold text-slate-800 mb-2">Automotive Smart Inventory</h3>
+              <p className="text-slate-500 mb-8">Process your inventory, verify categories, and sync directly to your GitHub repository for version-controlled record keeping.</p>
               <button onClick={handleLoadSample} className="px-6 py-3 bg-white border border-slate-200 text-slate-700 font-semibold rounded-2xl hover:bg-slate-50 transition-all shadow-sm">
                 Try Sample Data
               </button>
@@ -351,7 +545,7 @@ const App: React.FC = () => {
 
                   <div className="lg:col-span-2 bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
                     <div className="px-6 py-5 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
-                      <h3 className="font-bold text-slate-800 uppercase text-xs tracking-wider">Top Performing Categories</h3>
+                      <h3 className="font-bold text-slate-800 uppercase text-xs tracking-wider">Stock Health by Category</h3>
                     </div>
                     <div className="overflow-x-auto">
                       <table className="w-full text-left">
@@ -455,7 +649,6 @@ const App: React.FC = () => {
                     </table>
                   </div>
 
-                  {/* Pagination Footer */}
                   {filteredItems.length > 0 && (
                     <div className="px-8 py-6 border-t border-slate-100 bg-slate-50/30 flex flex-col sm:flex-row items-center justify-between gap-4">
                       <p className="text-sm text-slate-500 font-medium">
@@ -506,7 +699,7 @@ const App: React.FC = () => {
                   {filteredItems.length === 0 && (
                     <div className="py-20 text-center text-slate-400">
                       <Package className="w-12 h-12 mx-auto mb-4 opacity-20" />
-                      <p className="font-medium">No results matching your current search or filter.</p>
+                      <p className="font-medium">No results found for your search.</p>
                     </div>
                   )}
                 </div>
