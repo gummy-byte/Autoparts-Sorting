@@ -735,7 +735,7 @@ const App: React.FC = () => {
                             </button>
                           </td>
                           <td className="px-2 sm:px-4 py-1.5 sm:py-2 font-mono text-[10px] sm:text-[11px] text-pink-600 font-black tracking-tight">{item.code}</td>
-                          <td className="px-2 sm:px-6 py-1.5 sm:py-2"><p className="text-[10px] sm:text-xs font-bold text-slate-800 line-clamp-2 leading-tight">{item.description}</p></td>
+                          <td className="px-2 sm:px-6 py-1.5 sm:py-2"><p className="text-[10px] sm:text-xs font-bold text-slate-800 leading-tight">{item.description}</p></td>
                           <td className="px-2 sm:px-6 py-1.5 sm:py-2">
                              <select value={item.category} onChange={(e) => handleFieldChange(item.id, 'category', e.target.value)} className="w-full bg-pink-50/40 hover:bg-white text-pink-700 text-[9px] sm:text-[10px] font-black uppercase tracking-wider px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg sm:rounded-xl appearance-none cursor-pointer border border-transparent hover:border-pink-100 shadow-sm outline-none truncate">
                                {availableCategories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
