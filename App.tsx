@@ -30,7 +30,10 @@ import {
   CheckSquare,
   Square,
   Plus,
-  Tag
+  Tag,
+  Database,
+  Trash2,
+  MapPin
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -62,6 +65,66 @@ interface GitHubConfig {
   branch: string;
 }
 
+// IndexedDB Helpers
+const DB_NAME = 'AutoPartDB';
+const STORE_NAME = 'InventoryStore';
+
+const initDB = (): Promise<IDBDatabase> => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, 2); 
+    request.onupgradeneeded = (event: any) => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+};
+
+const saveToDB = async (items: InventoryItem[], categories: string[], zones: string[]) => {
+  const db = await initDB();
+  const tx = db.transaction(STORE_NAME, 'readwrite');
+  const store = tx.objectStore(STORE_NAME);
+  store.put(items, 'items');
+  store.put(categories, 'categories');
+  store.put(zones, 'zones');
+  return new Promise((resolve) => {
+    tx.oncomplete = () => resolve(true);
+  });
+};
+
+const loadFromDB = async (): Promise<{items: InventoryItem[], categories: string[], zones: string[]} | null> => {
+  const db = await initDB();
+  const tx = db.transaction(STORE_NAME, 'readonly');
+  const store = tx.objectStore(STORE_NAME);
+  const itemsReq = store.get('items');
+  const catsReq = store.get('categories');
+  const zonesReq = store.get('zones');
+  
+  return new Promise((resolve) => {
+    tx.oncomplete = () => {
+      if (itemsReq.result) {
+        resolve({ 
+          items: itemsReq.result, 
+          categories: catsReq.result || Object.values(ItemCategory),
+          zones: zonesReq.result || ["Unassigned", "Zone A", "Zone B", "Zone C"]
+        });
+      } else {
+        resolve(null);
+      }
+    };
+  });
+};
+
+const clearDB = async () => {
+  const db = await initDB();
+  const tx = db.transaction(STORE_NAME, 'readwrite');
+  const store = tx.objectStore(STORE_NAME);
+  store.clear();
+};
+
 const parseCSVLine = (line: string): string[] => {
   const result: string[] = [];
   let current = '';
@@ -86,34 +149,51 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'overview' | 'inventory'>('overview');
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string>("All");
+  const [selectedZone, setSelectedZone] = useState<string>("All");
   const [currentPage, setCurrentPage] = useState(1);
   
-  // Dynamic Categories State
   const [availableCategories, setAvailableCategories] = useState<string[]>(Object.values(ItemCategory));
+  const [availableZones, setAvailableZones] = useState<string[]>(["Unassigned", "Zone A", "Zone B", "Zone C"]);
   
-  // Category Creation Modal State
-  const [isAddCategoryModalOpen, setIsAddCategoryModalOpen] = useState(false);
-  const [newCategoryName, setNewCategoryName] = useState("");
-  const [categoryTarget, setCategoryTarget] = useState<{ type: 'single' | 'bulk', id?: string } | null>(null);
+  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [modalType, setModalType] = useState<'category' | 'zone'>('category');
+  const [newName, setNewName] = useState("");
+  const [modalTarget, setModalTarget] = useState<{ type: 'single' | 'bulk', id?: string } | null>(null);
 
-  // Selection State
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
 
-  // Sync States
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [isCleanupPromptOpen, setIsCleanupPromptOpen] = useState(false);
+  
   const [ghConfig, setGhConfig] = useState<GitHubConfig>(() => {
     const saved = localStorage.getItem('gh_config');
     return saved ? JSON.parse(saved) : { token: '', repo: '', path: 'inventory_categorized.csv', branch: 'main' };
   });
 
-  // Export States
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [exportFormat, setExportFormat] = useState<'standard' | 'categorized'>('standard');
 
-  // Mobile Menu State
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+
+  useEffect(() => {
+    const init = async () => {
+      const data = await loadFromDB();
+      if (data) {
+        setItems(data.items);
+        setAvailableCategories(data.categories);
+        setAvailableZones(data.zones);
+      }
+    };
+    init();
+  }, []);
+
+  useEffect(() => {
+    if (items.length > 0) {
+      saveToDB(items, availableCategories, availableZones);
+    }
+  }, [items, availableCategories, availableZones]);
 
   useEffect(() => {
     localStorage.setItem('gh_config', JSON.stringify(ghConfig));
@@ -121,35 +201,35 @@ const App: React.FC = () => {
 
   useEffect(() => {
     setCurrentPage(1);
-    setSelectedItems(new Set()); // Clear selection on filter change
-  }, [searchTerm, selectedCategory]);
+    setSelectedItems(new Set()); 
+  }, [searchTerm, selectedCategory, selectedZone]);
 
   const processCSV = (text: string) => {
     const lines = text.split(/\r?\n/).filter(line => line.trim().length > 0);
     if (lines.length === 0) return;
 
-    let qtyIdx = -1, codeIdx = -1, descIdx = -1, catIdx = -1, headerLineIdx = -1;
+    let qtyIdx = -1, codeIdx = -1, descIdx = -1, catIdx = -1, zoneIdx = -1, headerLineIdx = -1;
     
-    // Find header row and column indices
     for (let i = 0; i < Math.min(lines.length, 10); i++) {
       const parts = parseCSVLine(lines[i]).map(p => p.toLowerCase());
       const fQty = parts.findIndex(p => p.includes('qty') || p.includes('quantity') || p === 'q');
       const fCode = parts.findIndex(p => p.includes('code') || p.includes('part') || p.includes('sku'));
       const fDesc = parts.findIndex(p => p.includes('desc') || p.includes('item') || p.includes('name'));
       const fCat = parts.findIndex(p => p.includes('category') || p.includes('type') || p.includes('group') || p === 'cat');
+      const fZone = parts.findIndex(p => p.includes('zone') || p.includes('location') || p.includes('area') || p === 'zn');
 
       if ((fQty !== -1 && fCode !== -1) || (fQty !== -1 && fDesc !== -1) || (fCode !== -1 && fDesc !== -1)) {
-        qtyIdx = fQty; codeIdx = fCode; descIdx = fDesc; catIdx = fCat; headerLineIdx = i; break;
+        qtyIdx = fQty; codeIdx = fCode; descIdx = fDesc; catIdx = fCat; zoneIdx = fZone; headerLineIdx = i; break;
       }
     }
 
     if (headerLineIdx === -1) { 
       qtyIdx = 0; codeIdx = 1; descIdx = 2; headerLineIdx = -1; 
-      // Keep catIdx as -1 if we couldn't determine header, assuming no category column
     }
 
     const parsedItems: InventoryItem[] = [];
     const newCategories = new Set<string>();
+    const newZones = new Set<string>();
 
     for (let i = headerLineIdx + 1; i < lines.length; i++) {
       const parts = parseCSVLine(lines[i]);
@@ -163,12 +243,19 @@ const App: React.FC = () => {
         category = parts[catIdx].trim();
       }
 
-      // If category is empty or "null" string, use classifier
+      let zone = "Unassigned";
+      if (zoneIdx !== -1 && parts[zoneIdx]) {
+        zone = parts[zoneIdx].trim();
+      }
+
       if (!category || category.toLowerCase() === 'null') {
         category = classifyItem(description);
       } else {
-        // If we found a category in CSV, ensure it's added to our available categories
         if (category.trim()) newCategories.add(category.trim());
+      }
+
+      if (zone.trim() && zone.toLowerCase() !== 'null' && zone !== 'Unassigned') {
+        newZones.add(zone.trim());
       }
       
       parsedItems.push({
@@ -176,11 +263,11 @@ const App: React.FC = () => {
         qty,
         code: code || "UNKNOWN",
         description: description || "Untitled Part",
-        category
+        category,
+        zone: zone || "Unassigned"
       });
     }
 
-    // Update available categories with any new ones found
     if (newCategories.size > 0) {
       setAvailableCategories(prev => {
         const combined = new Set([...prev, ...Array.from(newCategories)]);
@@ -188,47 +275,68 @@ const App: React.FC = () => {
       });
     }
 
+    if (newZones.size > 0) {
+      setAvailableZones(prev => {
+        const combined = new Set([...prev, ...Array.from(newZones)]);
+        return Array.from(combined).sort();
+      });
+    }
+
     setItems(parsedItems);
   };
 
-  const openAddCategoryModal = (type: 'single' | 'bulk', id?: string) => {
-    setCategoryTarget({ type, id });
-    setNewCategoryName("");
-    setIsAddCategoryModalOpen(true);
+  const handleClearData = async () => {
+    await clearDB();
+    setItems([]);
+    setAvailableCategories(Object.values(ItemCategory));
+    setAvailableZones(["Unassigned", "Zone A", "Zone B", "Zone C"]);
+    setIsCleanupPromptOpen(false);
   };
 
-  const handleConfirmAddCategory = () => {
-    if (!newCategoryName.trim()) return;
-    const name = newCategoryName.trim();
+  const openAddModal = (type: 'category' | 'zone', mode: 'single' | 'bulk', id?: string) => {
+    setModalType(type);
+    setModalTarget({ type: mode, id });
+    setNewName("");
+    setIsAddModalOpen(true);
+  };
+
+  const handleConfirmAdd = () => {
+    if (!newName.trim()) return;
+    const name = newName.trim();
     
-    setAvailableCategories(prev => {
-      if (prev.includes(name)) return prev;
-      return [...prev, name].sort();
-    });
-
-    if (categoryTarget?.type === 'bulk') {
+    if (modalType === 'category') {
+      setAvailableCategories(prev => prev.includes(name) ? prev : [...prev, name].sort());
+      if (modalTarget?.type === 'bulk') {
         setItems(prev => prev.map(item => selectedItems.has(item.id) ? { ...item, category: name } : item));
-        setSelectedItems(new Set());
-    } else if (categoryTarget?.type === 'single' && categoryTarget.id) {
-        setItems(prev => prev.map(item => item.id === categoryTarget.id ? { ...item, category: name } : item));
+      } else if (modalTarget?.id) {
+        setItems(prev => prev.map(item => item.id === modalTarget.id ? { ...item, category: name } : item));
+      }
+    } else {
+      setAvailableZones(prev => prev.includes(name) ? prev : [...prev, name].sort());
+      if (modalTarget?.type === 'bulk') {
+        setItems(prev => prev.map(item => selectedItems.has(item.id) ? { ...item, zone: name } : item));
+      } else if (modalTarget?.id) {
+        setItems(prev => prev.map(item => item.id === modalTarget.id ? { ...item, zone: name } : item));
+      }
     }
 
-    setIsAddCategoryModalOpen(false);
+    if (modalTarget?.type === 'bulk') setSelectedItems(new Set());
+    setIsAddModalOpen(false);
   };
 
-  const handleCategoryChange = (id: string, newCategory: string) => {
-    if (newCategory === '__NEW__') {
-      openAddCategoryModal('single', id);
+  const handleFieldChange = (id: string, field: 'category' | 'zone', value: string) => {
+    if (value === '__NEW__') {
+      openAddModal(field, 'single', id);
     } else {
-      setItems(prev => prev.map(item => item.id === id ? { ...item, category: newCategory } : item));
+      setItems(prev => prev.map(item => item.id === id ? { ...item, [field]: value } : item));
     }
   };
 
-  const handleBulkCategoryChange = (newCategory: string) => {
-    if (newCategory === '__NEW__') {
-      openAddCategoryModal('bulk');
+  const handleBulkFieldChange = (field: 'category' | 'zone', value: string) => {
+    if (value === '__NEW__') {
+      openAddModal(field, 'bulk');
     } else {
-      setItems(prev => prev.map(item => selectedItems.has(item.id) ? { ...item, category: newCategory } : item));
+      setItems(prev => prev.map(item => selectedItems.has(item.id) ? { ...item, [field]: value } : item));
       setSelectedItems(new Set());
     }
   };
@@ -241,34 +349,12 @@ const App: React.FC = () => {
   };
 
   const generateStandardCSV = () => {
-    const headers = ["Quantity", "Code", "Description", "Category"];
-    const rows = items.map(item => [item.qty, `"${item.code}"`, `"${item.description}"`, `"${item.category}"`]);
+    const headers = ["Quantity", "Code", "Description", "Category", "Zone"];
+    const rows = items.map(item => [item.qty, `"${item.code}"`, `"${item.description}"`, `"${item.category}"`, `"${item.zone}"`]);
     return [headers, ...rows].map(e => e.join(",")).join("\n");
   };
 
-  const generateCategorizedCSVPreview = () => {
-    // This is just for the text preview box
-    let csv = "No,Code,Description,Qty\n";
-    const grouped = items.reduce((acc, item) => {
-      if (!acc[item.category]) acc[item.category] = [];
-      acc[item.category].push(item);
-      return acc;
-    }, {} as Record<string, InventoryItem[]>);
-    const sortedCategories = Object.keys(grouped).sort();
-    let globalIndex = 1;
-
-    sortedCategories.forEach(cat => {
-      csv += `\n[ ${cat.toUpperCase()} ]\n`; // Simplified text representation
-      grouped[cat].forEach(item => {
-        csv += `${globalIndex},"${item.code}","${item.description}",${item.qty}\n`;
-        globalIndex++;
-      });
-    });
-    return csv;
-  };
-
   const generateCategorizedXLS = () => {
-    // This generates an HTML table that Excel interprets as a spreadsheet with formatting
     const grouped = items.reduce((acc, item) => {
       if (!acc[item.category]) acc[item.category] = [];
       acc[item.category].push(item);
@@ -281,20 +367,6 @@ const App: React.FC = () => {
       <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
       <head>
         <meta charset="UTF-8">
-        <!--[if gte mso 9]>
-        <xml>
-          <x:ExcelWorkbook>
-            <x:ExcelWorksheets>
-              <x:ExcelWorksheet>
-                <x:Name>Inventory Report</x:Name>
-                <x:WorksheetOptions>
-                  <x:DisplayGridlines/>
-                </x:WorksheetOptions>
-              </x:ExcelWorksheet>
-            </x:ExcelWorksheets>
-          </x:ExcelWorkbook>
-        </xml>
-        <![endif]-->
         <style>
           table { border-collapse: collapse; width: 100%; font-family: Arial, sans-serif; }
           th, td { border: 1px solid #e2e8f0; padding: 8px; text-align: left; }
@@ -310,6 +382,7 @@ const App: React.FC = () => {
               <th style="width: 50px">No</th>
               <th style="width: 150px">Code</th>
               <th style="width: 400px">Description</th>
+              <th style="width: 120px">Zone</th>
               <th style="width: 80px">Qty</th>
             </tr>
           </thead>
@@ -317,22 +390,9 @@ const App: React.FC = () => {
     `;
 
     sortedCategories.forEach(cat => {
-      // Category Header Row with Yellow Background
-      html += `
-        <tr>
-          <td colspan="4" class="category-header">${cat.toUpperCase()}</td>
-        </tr>
-      `;
-      
+      html += `<tr><td colspan="5" class="category-header">${cat.toUpperCase()}</td></tr>`;
       grouped[cat].forEach(item => {
-        html += `
-          <tr>
-            <td>${globalIndex}</td>
-            <td>${item.code}</td>
-            <td>${item.description}</td>
-            <td class="qty-col">${item.qty}</td>
-          </tr>
-        `;
+        html += `<tr><td>${globalIndex}</td><td>${item.code}</td><td>${item.description}</td><td>${item.zone}</td><td class="qty-col">${item.qty}</td></tr>`;
         globalIndex++;
       });
     });
@@ -341,15 +401,8 @@ const App: React.FC = () => {
     return html;
   };
 
-  const getExportPreview = () => {
-    const content = exportFormat === 'standard' ? generateStandardCSV() : generateCategorizedCSVPreview();
-    const lines = content.split('\n');
-    return lines.slice(0, 10).join('\n') + (lines.length > 10 ? '\n...' : '');
-  };
-
   const handleDownload = () => {
     let content, mimeType, extension;
-
     if (exportFormat === 'standard') {
       content = generateStandardCSV();
       mimeType = 'text/csv;charset=utf-8;';
@@ -366,6 +419,7 @@ const App: React.FC = () => {
     link.download = `inventory_${exportFormat}_${new Date().toISOString().split('T')[0]}.${extension}`;
     link.click();
     setIsExportModalOpen(false);
+    setTimeout(() => setIsCleanupPromptOpen(true), 1000);
   };
 
   const syncToGitHub = async () => {
@@ -384,31 +438,19 @@ const App: React.FC = () => {
         headers: { 'Authorization': `token ${ghConfig.token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: `Inventory update: ${new Date().toLocaleString()}`, content: contentBase64, branch: ghConfig.branch, sha })
       });
-      if (put.ok) { setSyncStatus('success'); setTimeout(() => setSyncStatus('idle'), 3000); }
+      if (put.ok) { 
+        setSyncStatus('success'); 
+        setTimeout(() => setSyncStatus('idle'), 3000);
+        setTimeout(() => setIsCleanupPromptOpen(true), 1000);
+      }
       else throw new Error();
     } catch { setSyncStatus('error'); }
     finally { setIsSyncing(false); }
   };
 
-  const handleLoadSample = () => {
-    const sample = `Qty,Code,Item Description,Category
-2,(AC) 315143,BLOWER MOTOR TOYOTA UNSER/AVANZA (RL),
-0,(AC)2850,CABIN FILTER TOYOTA INNOVA/ESTIMA,Cabin Filter
-15,(AC)CFMY,CABIN FILTER PERODUA ALZA/MYVI BEST/AXIA (120010),
-0,03C115561J,03C115561J (UNKNOWN DESC),Unknown
-1,2105,CVT OIL TOYOTA TC 4L INC L.C,Fluids & Oils
-7,11193-97201,PLUG SEAL SET KELISA 1.0,
-4,11427508969,OIL FILTER BMW E46 2.0,Oil Filter
-2,08269-P9908ZT3,CVT OIL HONDA CVTF 3.5L INC L.C,Fluids & Oils
-1,11302-87Z03,TIMING COVER PERODUA MYVI KENARI KELISA INC L.C,Engine Parts
-3,17220-RNA-000,AIR FILTER HONDA CIVIC 1.8,
-6,GDB7707,BRAKE PAD (F) PROTON SAGA BLM/FLX INC L.C -TRW-,Brakes`;
-    processCSV(sample);
-  };
-
   const handleTabChange = (tab: 'overview' | 'inventory') => {
     setActiveTab(tab);
-    setIsMobileMenuOpen(false); // Auto close menu on selection
+    setIsMobileMenuOpen(false);
   };
 
   const stats: CategoryStat[] = useMemo(() => {
@@ -424,9 +466,10 @@ const App: React.FC = () => {
     return items.filter(item => {
       const matchS = item.description.toLowerCase().includes(searchTerm.toLowerCase()) || item.code.toLowerCase().includes(searchTerm.toLowerCase());
       const matchC = selectedCategory === "All" || item.category === selectedCategory;
-      return matchS && matchC;
+      const matchZ = selectedZone === "All" || item.zone === selectedZone;
+      return matchS && matchC && matchZ;
     });
-  }, [items, searchTerm, selectedCategory]);
+  }, [items, searchTerm, selectedCategory, selectedZone]);
 
   const totalPages = Math.ceil(filteredItems.length / ITEMS_PER_PAGE);
   const paginatedItems = useMemo(() => {
@@ -450,37 +493,46 @@ const App: React.FC = () => {
     <div className="h-screen w-full flex bg-[#fff1f5] font-['Inter'] overflow-hidden">
       {/* Mobile Menu Overlay */}
       {isMobileMenuOpen && (
-        <div 
-          className="fixed inset-0 bg-pink-900/30 backdrop-blur-sm z-40 lg:hidden animate-in fade-in duration-200"
-          onClick={() => setIsMobileMenuOpen(false)}
-        />
+        <div className="fixed inset-0 bg-pink-900/30 backdrop-blur-sm z-40 lg:hidden" onClick={() => setIsMobileMenuOpen(false)}/>
       )}
 
-      {/* Add Category Modal */}
-      {isAddCategoryModalOpen && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-           <div className="bg-white rounded-3xl w-full max-w-sm p-6 shadow-2xl border border-pink-100 transform transition-all scale-100">
-             <div className="flex justify-between items-center mb-6">
-               <h3 className="text-lg font-black text-slate-800 flex items-center gap-2"><Tag className="w-5 h-5 text-pink-500" /> New Category</h3>
-               <button onClick={() => setIsAddCategoryModalOpen(false)} className="text-slate-400 hover:text-slate-600 p-1 rounded-full hover:bg-slate-50"><X className="w-5 h-5" /></button>
+      {/* Cleanup Prompt Modal */}
+      {isCleanupPromptOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-md p-4 animate-in fade-in duration-300">
+           <div className="bg-white rounded-[2.5rem] w-full max-w-sm p-8 shadow-2xl border border-pink-100 text-center">
+             <div className="bg-pink-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-6 text-pink-600">
+                <Trash2 className="w-8 h-8" />
              </div>
-             
-             <div className="mb-6">
-               <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Category Name</label>
-               <input 
-                 autoFocus
-                 type="text" 
-                 value={newCategoryName}
-                 onChange={(e) => setNewCategoryName(e.target.value)}
-                 onKeyDown={(e) => e.key === 'Enter' && handleConfirmAddCategory()}
-                 placeholder="e.g., Transmission"
-                 className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-pink-500/20 focus:border-pink-500 outline-none font-bold text-slate-800 placeholder:font-normal placeholder:text-slate-400"
-               />
+             <h3 className="text-xl font-black text-slate-800 mb-3 tracking-tight">Export Successful!</h3>
+             <p className="text-slate-500 text-sm font-medium mb-8 leading-relaxed">
+               Your work is now safely saved. Would you like to clear the temporary browser storage for a fresh start?
+             </p>
+             <div className="flex flex-col gap-3">
+               <button onClick={handleClearData} className="w-full py-4 bg-pink-600 text-white font-black rounded-2xl shadow-xl shadow-pink-600/20 hover:bg-pink-700 transition-all">Yes, Clear Storage</button>
+               <button onClick={() => setIsCleanupPromptOpen(false)} className="w-full py-4 text-slate-400 font-bold hover:bg-slate-50 rounded-2xl transition-all">Not yet, keep data</button>
              </div>
+           </div>
+        </div>
+      )}
 
+      {/* Add New Category/Zone Modal */}
+      {isAddModalOpen && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 animate-in fade-in">
+           <div className="bg-white rounded-3xl w-full max-w-sm p-6 shadow-2xl border border-pink-100">
+             <div className="flex justify-between items-center mb-6">
+               <h3 className="text-lg font-black text-slate-800 flex items-center gap-2">
+                 {modalType === 'category' ? <Tag className="w-5 h-5 text-pink-500" /> : <MapPin className="w-5 h-5 text-pink-500" />}
+                 New {modalType === 'category' ? 'Category' : 'Zone'}
+               </h3>
+               <button onClick={() => setIsAddModalOpen(false)} className="text-slate-400 hover:text-slate-600 p-1 rounded-full hover:bg-slate-50"><X className="w-5 h-5" /></button>
+             </div>
+             <div className="mb-6">
+               <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Name</label>
+               <input autoFocus type="text" value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleConfirmAdd()} placeholder={`e.g., ${modalType === 'category' ? 'Transmission' : 'Zone D'}`} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-pink-500/20 focus:border-pink-500 outline-none font-bold text-slate-800" />
+             </div>
              <div className="flex gap-3">
-               <button onClick={() => setIsAddCategoryModalOpen(false)} className="flex-1 py-3 text-slate-500 font-bold hover:bg-slate-50 rounded-xl transition-all text-sm">Cancel</button>
-               <button onClick={handleConfirmAddCategory} className="flex-[2] py-3 bg-pink-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-pink-600/20 hover:bg-pink-700 text-sm">Create & Apply</button>
+               <button onClick={() => setIsAddModalOpen(false)} className="flex-1 py-3 text-slate-500 font-bold hover:bg-slate-50 rounded-xl text-sm">Cancel</button>
+               <button onClick={handleConfirmAdd} className="flex-[2] py-3 bg-pink-600 text-white font-bold rounded-xl shadow-lg shadow-pink-600/20 hover:bg-pink-700 text-sm">Create & Apply</button>
              </div>
            </div>
         </div>
@@ -489,137 +541,43 @@ const App: React.FC = () => {
       {/* Bulk Action Bar */}
       {selectedItems.size > 0 && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] animate-in slide-in-from-bottom-10 fade-in duration-300">
-          <div className="bg-slate-900 text-white rounded-2xl shadow-2xl p-4 flex items-center gap-4 border border-white/10 pr-6">
-            <div className="bg-pink-600 px-3 py-1.5 rounded-lg text-xs font-black uppercase tracking-wider">
+          <div className="bg-slate-900 text-white rounded-2xl shadow-2xl p-4 flex items-center gap-4 sm:gap-6 border border-white/10 pr-6 overflow-x-auto max-w-[95vw]">
+            <div className="bg-pink-600 px-3 py-1.5 rounded-lg text-[10px] sm:text-xs font-black uppercase tracking-wider whitespace-nowrap">
               {selectedItems.size} Selected
             </div>
-            <div className="h-6 w-px bg-slate-700"></div>
+            
             <div className="flex items-center gap-3">
-              <span className="text-sm font-medium text-slate-300">Move to:</span>
-              <div className="relative group/bulk">
-                 <select 
-                    className="appearance-none bg-slate-800 border border-slate-700 hover:border-pink-500 rounded-xl px-4 py-2 pr-10 text-sm font-bold focus:ring-2 focus:ring-pink-500/50 outline-none transition-all cursor-pointer"
-                    onChange={(e) => {
-                      if (e.target.value) handleBulkCategoryChange(e.target.value);
-                    }}
-                    value=""
-                 >
-                    <option value="" disabled>Choose Category...</option>
-                    {availableCategories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
-                    <option value="__NEW__" className="text-pink-400 font-bold">+ Create New Category</option>
-                 </select>
-                 <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+              <span className="text-[10px] uppercase font-black text-slate-500 tracking-widest hidden sm:inline">Move to:</span>
+              <div className="flex gap-2">
+                <div className="relative">
+                  <select className="appearance-none bg-slate-800 border border-slate-700 hover:border-pink-500 rounded-xl px-4 py-2 pr-8 text-[10px] sm:text-xs font-bold focus:ring-2 focus:ring-pink-500/50 outline-none transition-all cursor-pointer min-w-[80px]" onChange={(e) => handleBulkFieldChange('category', e.target.value)} value="">
+                      <option value="" disabled>Cat...</option>
+                      {availableCategories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                      <option value="__NEW__" className="text-pink-400 font-bold">+ New</option>
+                  </select>
+                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
+                </div>
+                <div className="relative">
+                  <select className="appearance-none bg-slate-800 border border-slate-700 hover:border-pink-500 rounded-xl px-4 py-2 pr-8 text-[10px] sm:text-xs font-bold focus:ring-2 focus:ring-pink-500/50 outline-none transition-all cursor-pointer min-w-[80px]" onChange={(e) => handleBulkFieldChange('zone', e.target.value)} value="">
+                      <option value="" disabled>Zone...</option>
+                      {availableZones.map(z => <option key={z} value={z}>{z}</option>)}
+                      <option value="__NEW__" className="text-pink-400 font-bold">+ New</option>
+                  </select>
+                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
+                </div>
               </div>
             </div>
-            <button 
-              onClick={() => setSelectedItems(new Set())}
-              className="ml-2 p-2 hover:bg-white/10 rounded-xl text-slate-400 hover:text-white transition-colors"
-            >
+            <button onClick={() => setSelectedItems(new Set())} className="ml-2 p-2 hover:bg-white/10 rounded-xl text-slate-400 hover:text-white transition-colors">
               <X className="w-4 h-4" />
             </button>
           </div>
         </div>
       )}
 
-      {/* Settings Modal */}
-      {isSyncModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-pink-900/40 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-3xl w-full max-w-md p-8 shadow-2xl animate-in fade-in zoom-in duration-200 border border-pink-100">
-            <div className="flex justify-between items-center mb-6">
-              <h3 className="text-xl font-bold text-pink-800 flex items-center gap-2"><Github className="w-6 h-6" />GitHub Sync</h3>
-              <button onClick={() => setIsSyncModalOpen(false)} className="text-pink-300 hover:text-pink-600"><X className="w-5 h-5" /></button>
-            </div>
-            <div className="space-y-4">
-              <div><label className="block text-[10px] font-bold text-pink-400 uppercase tracking-widest mb-1.5">Personal Access Token</label>
-                <input type="password" placeholder="ghp_..." className="w-full px-4 py-3 bg-pink-50 border border-pink-100 rounded-xl focus:ring-2 focus:ring-pink-500/20 outline-none" value={ghConfig.token} onChange={(e) => setGhConfig({...ghConfig, token: e.target.value})} />
-              </div>
-              <div><label className="block text-[10px] font-bold text-pink-400 uppercase tracking-widest mb-1.5">Repository (owner/repo)</label>
-                <input type="text" placeholder="user/repo" className="w-full px-4 py-3 bg-pink-50 border border-pink-100 rounded-xl focus:ring-2 focus:ring-pink-500/20 outline-none" value={ghConfig.repo} onChange={(e) => setGhConfig({...ghConfig, repo: e.target.value})} />
-              </div>
-            </div>
-            <div className="mt-8 flex gap-3">
-              <button onClick={() => setIsSyncModalOpen(false)} className="flex-1 py-3 text-pink-600 font-bold hover:bg-pink-50 rounded-xl transition-all">Cancel</button>
-              <button onClick={() => { setIsSyncModalOpen(false); syncToGitHub(); }} className="flex-1 py-3 bg-pink-600 text-white font-bold rounded-xl transition-all shadow-xl shadow-pink-600/20 flex items-center justify-center gap-2"><Save className="w-4 h-4" />Save</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Export Format Modal */}
-      {isExportModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-          <div className="bg-white rounded-3xl w-full max-w-2xl p-8 shadow-2xl border border-pink-100 flex flex-col max-h-[90vh]">
-            <div className="flex justify-between items-center mb-8">
-              <div>
-                <h3 className="text-2xl font-black text-slate-800 tracking-tight">Export Inventory</h3>
-                <p className="text-slate-500 text-sm font-medium mt-1">Select your preferred file format</p>
-              </div>
-              <button onClick={() => setIsExportModalOpen(false)} className="p-2 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"><X className="w-6 h-6" /></button>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
-              <button 
-                onClick={() => setExportFormat('standard')}
-                className={`relative p-6 rounded-2xl border-2 text-left transition-all group ${exportFormat === 'standard' ? 'border-pink-500 bg-pink-50/50 ring-4 ring-pink-500/10' : 'border-slate-100 hover:border-pink-200 hover:bg-slate-50'}`}
-              >
-                <div className={`w-10 h-10 rounded-xl mb-4 flex items-center justify-center transition-colors ${exportFormat === 'standard' ? 'bg-pink-500 text-white' : 'bg-slate-100 text-slate-500 group-hover:bg-pink-100 group-hover:text-pink-600'}`}>
-                  <FileText className="w-5 h-5" />
-                </div>
-                <h4 className={`font-black text-sm uppercase tracking-wide mb-2 ${exportFormat === 'standard' ? 'text-pink-700' : 'text-slate-700'}`}>Standard CSV</h4>
-                <p className="text-xs text-slate-500 font-medium leading-relaxed">Flat list with Quantity, Code, Description, and Category columns. Best for further data processing.</p>
-                {exportFormat === 'standard' && <div className="absolute top-4 right-4 w-3 h-3 bg-pink-500 rounded-full shadow-lg shadow-pink-500/30"></div>}
-              </button>
-
-              <button 
-                onClick={() => setExportFormat('categorized')}
-                className={`relative p-6 rounded-2xl border-2 text-left transition-all group ${exportFormat === 'categorized' ? 'border-pink-500 bg-pink-50/50 ring-4 ring-pink-500/10' : 'border-slate-100 hover:border-pink-200 hover:bg-slate-50'}`}
-              >
-                <div className={`w-10 h-10 rounded-xl mb-4 flex items-center justify-center transition-colors ${exportFormat === 'categorized' ? 'bg-pink-500 text-white' : 'bg-slate-100 text-slate-500 group-hover:bg-pink-100 group-hover:text-pink-600'}`}>
-                  <FileSpreadsheet className="w-5 h-5" />
-                </div>
-                <h4 className={`font-black text-sm uppercase tracking-wide mb-2 ${exportFormat === 'categorized' ? 'text-pink-700' : 'text-slate-700'}`}>Categorized Excel Report</h4>
-                <p className="text-xs text-slate-500 font-medium leading-relaxed">Formatted .xls file with color-coded headers (Yellow) and grouped categories. Ready for printing.</p>
-                {exportFormat === 'categorized' && <div className="absolute top-4 right-4 w-3 h-3 bg-pink-500 rounded-full shadow-lg shadow-pink-500/30"></div>}
-              </button>
-            </div>
-
-            <div className="flex-1 overflow-hidden flex flex-col min-h-0 mb-8 bg-slate-900 rounded-2xl border border-slate-800">
-              <div className="px-5 py-3 border-b border-slate-800 flex justify-between items-center bg-slate-900/50">
-                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-widest">File Preview</span>
-                <span className="text-[10px] font-mono text-slate-600">inventory_{exportFormat}.{exportFormat === 'standard' ? 'csv' : 'xls'}</span>
-              </div>
-              <div className="p-5 overflow-auto custom-scrollbar flex-1">
-                <pre className="font-mono text-xs text-slate-300 whitespace-pre leading-relaxed">{getExportPreview()}</pre>
-                {exportFormat === 'categorized' && <p className="text-[10px] text-pink-400 mt-2 font-mono">Note: Preview shows text structure. Downloaded file will include Yellow headers and formatting.</p>}
-              </div>
-            </div>
-
-            <div className="flex gap-4 pt-4 border-t border-slate-100">
-              <button onClick={() => setIsExportModalOpen(false)} className="flex-1 py-3.5 text-slate-500 font-bold hover:bg-slate-50 rounded-xl transition-all">Cancel</button>
-              <button onClick={handleDownload} className="flex-[2] py-3.5 bg-pink-600 hover:bg-pink-700 text-white font-bold rounded-xl transition-all shadow-xl shadow-pink-600/20 flex items-center justify-center gap-2">
-                <Download className="w-4 h-4" /> Download File
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Floating Sidebar Design - Fixed on Desktop */}
-      <aside className={`
-        fixed inset-y-0 left-0 z-50 w-80 flex flex-col 
-        transform transition-transform duration-300 ease-in-out
-        lg:translate-x-0
-        ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}
-      `}>
-        {/* Mobile Sidebar Background Handler (hidden on desktop) */}
+      <aside className={`fixed inset-y-0 left-0 z-50 w-80 flex flex-col transform transition-transform duration-300 ease-in-out lg:translate-x-0 ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}`}>
         <div className="absolute inset-0 bg-[#fff1f5] lg:hidden -z-10" />
-
         <div className="flex-1 bg-slate-900 text-white flex flex-col overflow-hidden relative border-r border-white/5">
-          {/* Close Button for Mobile */}
-          <button 
-            onClick={() => setIsMobileMenuOpen(false)}
-            className="absolute top-6 right-6 lg:hidden p-2 text-slate-400 hover:text-white transition-colors bg-white/10 rounded-full"
-          >
+          <button onClick={() => setIsMobileMenuOpen(false)} className="absolute top-6 right-6 lg:hidden p-2 text-slate-400 hover:text-white transition-colors bg-white/10 rounded-full">
             <X className="w-5 h-5" />
           </button>
 
@@ -628,9 +586,7 @@ const App: React.FC = () => {
               <div className="bg-gradient-to-br from-pink-400 to-rose-600 p-2.5 rounded-2xl shadow-lg shadow-pink-500/20">
                 <Package className="w-6 h-6 text-white" />
               </div>
-              <h1 className="text-xl font-black tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white to-pink-200">
-                AutoPart
-              </h1>
+              <h1 className="text-xl font-black tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white to-pink-200">AutoPart</h1>
             </div>
             <nav className="space-y-2">
               <button onClick={() => handleTabChange('overview')} className={`w-full flex items-center gap-3.5 px-5 py-4 rounded-2xl transition-all duration-300 ${activeTab === 'overview' ? 'bg-gradient-to-r from-pink-600 to-rose-600 text-white shadow-xl shadow-pink-600/30' : 'text-slate-400 hover:text-white hover:bg-white/10'}`}>
@@ -645,90 +601,81 @@ const App: React.FC = () => {
           <div className="mt-auto p-8 space-y-4 bg-white/5 backdrop-blur-md">
             <div className="p-5 bg-white/5 rounded-3xl border border-white/10">
               <div className="flex justify-between items-center mb-4">
-                <p className="text-[10px] text-pink-400 uppercase tracking-[0.2em] font-black">Sync Engine</p>
+                <p className="text-[10px] text-pink-400 uppercase tracking-[0.2em] font-black flex items-center gap-1.5"><Database className="w-3 h-3" /> Cloud Save</p>
                 <button onClick={() => { setIsMobileMenuOpen(false); setIsSyncModalOpen(true); }} className="p-1.5 hover:bg-white/10 rounded-xl transition-all text-slate-400"><Settings className="w-3.5 h-3.5" /></button>
               </div>
               <button onClick={syncToGitHub} disabled={items.length === 0 || isSyncing} className={`w-full flex items-center justify-center gap-2.5 py-3 rounded-2xl text-[11px] font-bold transition-all ${syncStatus === 'success' ? 'bg-emerald-500' : syncStatus === 'error' ? 'bg-rose-500' : 'bg-white/10 hover:bg-white/20'} text-white disabled:opacity-50`}>
                 {isSyncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : syncStatus === 'success' ? <Check className="w-3.5 h-3.5" /> : <Github className="w-3.5 h-3.5" />}
-                {isSyncing ? 'Pushing...' : syncStatus === 'success' ? 'Synced!' : 'Cloud Save'}
+                {isSyncing ? 'Pushing...' : syncStatus === 'success' ? 'Synced!' : 'Cloud Sync'}
               </button>
             </div>
-            
-            <p className="text-[10px] text-slate-600 font-bold text-center uppercase tracking-widest pt-2">
-              created by syamim with <span className="text-pink-500">❤️</span>
-            </p>
           </div>
         </div>
       </aside>
 
-      <main className="flex-1 min-w-0 p-4 md:p-6 lg:ml-80 h-full transition-all duration-300">
-        <div className="h-full flex flex-col">
-          <header className="bg-white/70 backdrop-blur-xl border border-white rounded-[2rem] px-6 py-5 flex flex-col sm:flex-row justify-between items-center gap-5 shadow-sm mb-6 flex-shrink-0">
-            <div className="flex items-center gap-4 w-full sm:w-auto">
-              <button 
-                onClick={() => setIsMobileMenuOpen(true)}
-                className="lg:hidden p-2 -ml-2 text-slate-500 hover:bg-pink-50 hover:text-pink-600 rounded-xl transition-colors"
-              >
-                <Menu className="w-6 h-6" />
-              </button>
-              <h2 className="text-2xl font-black text-slate-800 tracking-tight">{activeTab === 'overview' ? 'Real-time Stats' : 'Manage Stock'}</h2>
-            </div>
-            <div className="flex items-center gap-3 w-full sm:w-auto justify-end">
-              <button onClick={handleLoadSample} className="px-4 py-3 bg-pink-50 hover:bg-pink-100 text-pink-600 rounded-2xl transition-all font-bold text-sm flex items-center gap-2 border border-pink-100 shadow-sm whitespace-nowrap"><RefreshCw className="w-4 h-4" /><span className="hidden sm:inline">Sample</span></button>
-              <button onClick={() => setIsExportModalOpen(true)} disabled={items.length === 0} className="px-4 py-3 bg-white border border-slate-200 hover:border-pink-300 hover:bg-pink-50 text-slate-700 hover:text-pink-600 rounded-2xl transition-all font-bold text-sm flex items-center gap-2 shadow-sm disabled:opacity-50 whitespace-nowrap"><Download className="w-4 h-4" /><span className="hidden sm:inline">Export</span></button>
-              <label className="flex items-center gap-2 px-6 py-3 bg-slate-900 hover:bg-pink-600 text-white rounded-2xl cursor-pointer transition-all shadow-xl shadow-slate-900/10 font-bold text-sm whitespace-nowrap">
-                <FileUp className="w-4 h-4" /><span className="hidden sm:inline">Import</span> <input type="file" className="hidden" accept=".csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) { const r = new FileReader(); r.onload = (e) => processCSV(e.target?.result as string); r.readAsText(f); } }} />
-              </label>
-            </div>
-          </header>
+      <main className="flex-1 min-w-0 p-3 sm:p-4 md:p-6 lg:ml-80 h-full transition-all duration-300 flex flex-col">
+        <header className="bg-white/70 backdrop-blur-xl border border-white rounded-[1.5rem] sm:rounded-[2rem] px-4 sm:px-6 py-3 sm:py-5 flex flex-col sm:flex-row justify-between items-center gap-3 sm:gap-5 shadow-sm mb-4 sm:mb-6 flex-shrink-0">
+          <div className="flex items-center gap-3 sm:gap-4 w-full sm:w-auto">
+            <button onClick={() => setIsMobileMenuOpen(true)} className="lg:hidden p-2 -ml-2 text-slate-500 hover:bg-pink-50 hover:text-pink-600 rounded-xl transition-colors"><Menu className="w-6 h-6" /></button>
+            <h2 className="text-xl sm:text-2xl font-black text-slate-800 tracking-tight">{activeTab === 'overview' ? 'Real-time Stats' : 'Manage Stock'}</h2>
+          </div>
+          <div className="flex items-center gap-2 sm:gap-3 w-full sm:w-auto justify-end">
+            {items.length > 0 && (
+              <button onClick={() => setIsCleanupPromptOpen(true)} className="p-2 sm:p-3 text-slate-400 hover:text-rose-500 hover:bg-rose-50 rounded-xl sm:rounded-2xl transition-all"><Trash2 className="w-4 sm:w-5 h-4 sm:h-5" /></button>
+            )}
+            <button onClick={() => setIsExportModalOpen(true)} disabled={items.length === 0} className="px-3 sm:px-4 py-2 sm:py-3 bg-white border border-slate-200 hover:border-pink-300 hover:bg-pink-50 text-slate-700 hover:text-pink-600 rounded-xl sm:rounded-2xl transition-all font-bold text-xs sm:text-sm flex items-center gap-2 shadow-sm disabled:opacity-50 whitespace-nowrap"><Download className="w-3.5 sm:w-4 h-3.5 sm:h-4" /><span className="hidden sm:inline">Export</span></button>
+            <label className="flex items-center gap-2 px-4 sm:px-6 py-2 sm:py-3 bg-slate-900 hover:bg-pink-600 text-white rounded-xl sm:rounded-2xl cursor-pointer transition-all shadow-xl shadow-slate-900/10 font-bold text-xs sm:text-sm whitespace-nowrap">
+              <FileUp className="w-3.5 sm:w-4 h-3.5 sm:h-4" /><span className="hidden sm:inline">Import</span> <input type="file" className="hidden" accept=".csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) { const r = new FileReader(); r.onload = (e) => processCSV(e.target?.result as string); r.readAsText(f); } }} />
+            </label>
+          </div>
+        </header>
 
-          <div className={`flex-1 ${activeTab === 'inventory' ? 'overflow-hidden flex flex-col' : 'overflow-y-auto pr-2 custom-scrollbar'} pb-6`}>
-            {items.length === 0 ? (
-              <div className="flex flex-col items-center justify-center min-h-full text-center max-w-xl mx-auto px-6">
-                <div className="relative mb-8">
-                  <div className="absolute inset-0 bg-pink-500 blur-3xl opacity-20 animate-pulse"></div>
-                  <div className="relative bg-white p-10 rounded-[3rem] shadow-2xl border border-pink-50"><Sparkles className="w-12 h-12 text-pink-500" /></div>
-                </div>
-                <h3 className="text-3xl font-black text-slate-800 mb-4 tracking-tight">Organize Your Inventory</h3>
-                <p className="text-slate-500 mb-10 leading-relaxed text-lg font-medium">Upload a CSV of automotive parts. The system will scan part numbers and descriptions to categorize them automatically.</p>
-                <div className="flex flex-col sm:flex-row gap-4 w-full justify-center">
-                  <button onClick={handleLoadSample} className="px-8 py-4 bg-white border-2 border-slate-100 text-slate-700 font-black rounded-[1.5rem] hover:border-pink-200 hover:bg-pink-50 transition-all shadow-md">Try with Sample Data</button>
-                  <label className="px-8 py-4 bg-pink-600 text-white font-black rounded-[1.5rem] hover:bg-pink-700 transition-all shadow-xl shadow-pink-600/20 cursor-pointer text-center">Upload CSV File <input type="file" className="hidden" accept=".csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) { const r = new FileReader(); r.onload = (e) => processCSV(e.target?.result as string); r.readAsText(f); } }} /></label>
-                </div>
+        <div className={`flex-1 min-h-0 ${activeTab === 'inventory' ? 'flex flex-col' : 'overflow-y-auto pr-1 sm:pr-2 custom-scrollbar'}`}>
+          {items.length === 0 ? (
+            <div className="flex flex-col items-center justify-center min-h-full text-center max-w-xl mx-auto px-6 py-12">
+              <div className="relative mb-6 sm:mb-8">
+                <div className="absolute inset-0 bg-pink-500 blur-3xl opacity-20 animate-pulse"></div>
+                <div className="relative bg-white p-8 sm:p-10 rounded-[2rem] sm:rounded-[3rem] shadow-2xl border border-pink-50"><Sparkles className="w-10 sm:w-12 h-10 sm:h-12 text-pink-500" /></div>
               </div>
-            ) : (
-              <>
-                {activeTab === 'overview' ? (
-                  <>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+              <h3 className="text-2xl sm:text-3xl font-black text-slate-800 mb-3 sm:mb-4 tracking-tight">Protect Your Progress</h3>
+              <p className="text-slate-500 mb-8 sm:mb-10 leading-relaxed text-base sm:text-lg font-medium">AutoPart now supports Zones! Track warehouse locations alongside categories. All changes are saved automatically.</p>
+              <div className="flex flex-col sm:flex-row gap-4 w-full justify-center">
+                <label className="px-6 sm:px-8 py-3.5 sm:py-4 bg-pink-600 text-white font-black rounded-2xl sm:rounded-[1.5rem] hover:bg-pink-700 transition-all shadow-xl shadow-pink-600/20 cursor-pointer text-center">Upload CSV File <input type="file" className="hidden" accept=".csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) { const r = new FileReader(); r.onload = (e) => processCSV(e.target?.result as string); r.readAsText(f); } }} /></label>
+              </div>
+            </div>
+          ) : (
+            <>
+              {activeTab === 'overview' ? (
+                <div className="pb-8">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6 mb-8">
                     <StatCard title="Unique SKUs" value={items.length} icon={<Package />} color="pink" />
                     <StatCard title="Total Inventory" value={items.reduce((a,b)=>a+b.qty, 0)} icon={<BarChart3 />} color="rose" />
                     <StatCard title="Stock Alerts" value={items.filter(i=>i.qty<=0).length} icon={<AlertCircle />} color="fuchsia" subtitle="Low Qty" />
                     <StatCard title="Segments" value={stats.length} icon={<Filter />} color="rose" />
                   </div>
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
-                    <div className="bg-white p-8 rounded-[2.5rem] border border-white shadow-xl shadow-pink-900/5">
-                      <h3 className="text-lg font-black text-slate-800 mb-8 flex items-center gap-3"><BarChart3 className="w-5 h-5 text-pink-500" />Top Categories</h3>
-                      <div className="h-80 w-full">
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8">
+                    <div className="bg-white p-6 sm:p-8 rounded-[1.5rem] sm:rounded-[2.5rem] border border-white shadow-xl">
+                      <h3 className="text-base sm:text-lg font-black text-slate-800 mb-6 sm:mb-8 flex items-center gap-3"><BarChart3 className="w-5 h-5 text-pink-500" />Top Categories</h3>
+                      <div className="h-64 sm:h-80 w-full">
                         <ResponsiveContainer width="100%" height="100%">
-                          <BarChart data={stats.slice(0, 8)} layout="vertical" margin={{ left: 10 }}>
+                          <BarChart data={stats.slice(0, 8)} layout="vertical" margin={{ left: 0 }}>
                             <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={false} stroke="#fdf2f8" />
                             <XAxis type="number" hide />
-                            <YAxis dataKey="name" type="category" width={140} tick={{ fontSize: 11, fill: '#94a3b8', fontWeight: 700 }} axisLine={false} tickLine={false} />
-                            <Tooltip cursor={{ fill: '#fff5f8' }} contentStyle={{ borderRadius: '24px', border: 'none', boxShadow: '0 25px 50px -12px rgb(0 0 0 / 0.1)' }} />
-                            <Bar dataKey="count" radius={[0, 14, 14, 0]} barSize={20}>
+                            <YAxis dataKey="name" type="category" width={100} tick={{ fontSize: 10, fill: '#94a3b8', fontWeight: 700 }} axisLine={false} tickLine={false} />
+                            <Tooltip cursor={{ fill: '#fff5f8' }} />
+                            <Bar dataKey="count" radius={[0, 14, 14, 0]} barSize={16}>
                               {stats.map((e, i) => <Cell key={`c-${i}`} fill={COLORS[i % COLORS.length]} />)}
                             </Bar>
                           </BarChart>
                         </ResponsiveContainer>
                       </div>
                     </div>
-                    <div className="bg-white p-8 rounded-[2.5rem] border border-white shadow-xl shadow-pink-900/5">
-                      <h3 className="text-lg font-black text-slate-800 mb-8 flex items-center gap-3"><LayoutDashboard className="w-5 h-5 text-rose-500" />Distribution Mix</h3>
-                      <div className="h-80 w-full">
+                    <div className="bg-white p-6 sm:p-8 rounded-[1.5rem] sm:rounded-[2.5rem] border border-white shadow-xl">
+                      <h3 className="text-base sm:text-lg font-black text-slate-800 mb-6 sm:mb-8 flex items-center gap-3"><LayoutDashboard className="w-5 h-5 text-rose-500" />Distribution Mix</h3>
+                      <div className="h-64 sm:h-80 w-full">
                         <ResponsiveContainer width="100%" height="100%">
                           <PieChart>
-                            <Pie data={stats.slice(0, 6)} cx="50%" cy="50%" innerRadius={70} outerRadius={110} paddingAngle={10} dataKey="count">
+                            <Pie data={stats.slice(0, 6)} cx="50%" cy="50%" innerRadius={60} outerRadius={90} paddingAngle={8} dataKey="count">
                               {stats.map((e, i) => <Cell key={`p-${i}`} fill={COLORS[i % COLORS.length]} stroke="white" strokeWidth={4} />)}
                             </Pie>
                             <Tooltip />
@@ -736,120 +683,147 @@ const App: React.FC = () => {
                         </ResponsiveContainer>
                       </div>
                     </div>
-                    <div className="lg:col-span-2 bg-white rounded-[2.5rem] border border-white shadow-xl shadow-pink-900/5 overflow-hidden">
-                      <div className="px-10 py-7 border-b border-pink-50 bg-pink-50/20 flex justify-between items-center"><h3 className="font-black text-slate-700 uppercase text-[10px] tracking-[0.2em]">Detailed Inventory Health</h3></div>
-                      <div className="overflow-x-auto"><table className="w-full text-left">
-                        <thead><tr className="text-slate-400 text-[10px] uppercase tracking-[0.3em] font-black"><th className="px-10 py-6">Category</th><th className="px-10 py-6">SKUs</th><th className="px-10 py-6">Stock level</th><th className="px-10 py-6">Action</th></tr></thead>
-                        <tbody className="divide-y divide-pink-50">{stats.map((s, i) => (
-                          <tr key={s.name} className="hover:bg-pink-50/30 transition-colors group">
-                            <td className="px-10 py-6"><div className="flex items-center gap-4"><div className="w-3 h-3 rounded-full shadow-lg" style={{ backgroundColor: COLORS[i % COLORS.length] }} /><span className="font-bold text-slate-800">{s.name}</span></div></td>
-                            <td className="px-10 py-6 text-slate-500 font-bold text-sm">{s.count} items</td>
-                            <td className="px-10 py-6 text-slate-500 font-bold text-sm">{s.totalQty} units</td>
-                            <td className="px-10 py-6"><span className={`px-4 py-2 rounded-2xl text-[10px] font-black uppercase tracking-widest ${s.totalQty > 15 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{s.totalQty > 15 ? 'Good' : 'Restock'}</span></td>
-                          </tr>
-                        ))}</tbody></table></div>
-                    </div>
                   </div>
-                  </>
-                ) : (
-                  <div className="bg-white rounded-[2.5rem] border border-white shadow-xl shadow-pink-900/5 overflow-hidden flex flex-col h-full">
-                    <div className="p-8 border-b border-pink-50 flex flex-col sm:flex-row gap-5 justify-between bg-pink-50/10 flex-shrink-0">
-                      <div className="relative flex-1 group">
-                        <Search className="absolute left-6 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-pink-500 transition-colors" />
-                        <input type="text" placeholder="Search part codes, names..." className="w-full pl-14 pr-8 py-5 bg-white border-2 border-slate-100 rounded-[1.5rem] focus:ring-4 focus:ring-pink-500/10 focus:border-pink-500 outline-none transition-all text-sm font-bold shadow-sm" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
-                      </div>
-                      <div className="relative min-w-[200px] sm:min-w-[280px]">
-                        <Filter className="absolute left-6 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                        <select className="w-full pl-14 pr-12 py-5 bg-white border-2 border-slate-100 rounded-[1.5rem] focus:ring-4 focus:ring-pink-500/10 focus:border-pink-500 outline-none appearance-none transition-all text-sm font-black text-slate-700 shadow-sm" value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)}>
+                </div>
+              ) : (
+                <div className="bg-white rounded-[1.5rem] sm:rounded-[2.5rem] border border-white shadow-xl overflow-hidden flex flex-col h-full">
+                  <div className="p-4 sm:p-6 lg:p-8 border-b border-pink-50 flex flex-col lg:flex-row gap-3 sm:gap-5 justify-between bg-pink-50/10 flex-shrink-0">
+                    <div className="relative flex-[2] group">
+                      <Search className="absolute left-4 sm:left-6 top-1/2 -translate-y-1/2 w-3.5 sm:w-4 h-3.5 sm:h-4 text-slate-400 group-focus-within:text-pink-500" />
+                      <input type="text" placeholder="Search sku, name..." className="w-full pl-10 sm:pl-14 pr-4 sm:pr-8 py-3 sm:py-5 bg-white border-2 border-slate-100 rounded-xl sm:rounded-[1.5rem] focus:ring-4 focus:ring-pink-500/10 focus:border-pink-500 outline-none text-xs sm:text-sm font-bold shadow-sm" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+                    </div>
+                    <div className="flex flex-row gap-2 sm:gap-3 flex-1">
+                      <div className="relative flex-1 min-w-0">
+                        <Filter className="absolute left-3 sm:left-6 top-1/2 -translate-y-1/2 w-3.5 sm:w-4 h-3.5 sm:h-4 text-slate-400 pointer-events-none" />
+                        <select className="w-full pl-8 sm:pl-14 pr-6 sm:pr-12 py-3 sm:py-5 bg-white border-2 border-slate-100 rounded-xl sm:rounded-[1.5rem] outline-none appearance-none text-[10px] sm:text-xs font-black text-slate-700 shadow-sm truncate" value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)}>
                           <option value="All">All Categories</option>
                           {availableCategories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
                         </select>
-                        <ChevronDown className="absolute right-6 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+                        <ChevronDown className="absolute right-2 sm:right-6 top-1/2 -translate-y-1/2 w-3.5 sm:w-4 h-3.5 sm:h-4 text-slate-400 pointer-events-none" />
+                      </div>
+                      <div className="relative flex-1 min-w-0">
+                        <MapPin className="absolute left-3 sm:left-6 top-1/2 -translate-y-1/2 w-3.5 sm:w-4 h-3.5 sm:h-4 text-slate-400 pointer-events-none" />
+                        <select className="w-full pl-8 sm:pl-14 pr-6 sm:pr-12 py-3 sm:py-5 bg-white border-2 border-slate-100 rounded-xl sm:rounded-[1.5rem] outline-none appearance-none text-[10px] sm:text-xs font-black text-slate-700 shadow-sm truncate" value={selectedZone} onChange={(e) => setSelectedZone(e.target.value)}>
+                          <option value="All">All Zones</option>
+                          {availableZones.map(z => <option key={z} value={z}>{z}</option>)}
+                        </select>
+                        <ChevronDown className="absolute right-2 sm:right-6 top-1/2 -translate-y-1/2 w-3.5 sm:w-4 h-3.5 sm:h-4 text-slate-400 pointer-events-none" />
                       </div>
                     </div>
-                    <div className="flex-1 overflow-y-auto">
-                      <table className="w-full text-left table-fixed min-w-[800px]">
-                        <thead className="sticky top-0 bg-white z-10">
-                          <tr className="text-slate-400 text-[10px] uppercase tracking-[0.3em] font-black border-b border-pink-50 shadow-sm">
-                            <th className="pl-10 pr-4 py-4 w-16">
-                              <button 
-                                onClick={toggleAll}
-                                className={`w-4 h-4 rounded-lg border-2 flex items-center justify-center transition-all ${isAllSelected ? 'bg-pink-600 border-pink-600' : 'border-slate-300 hover:border-pink-400'}`}
-                              >
-                                {isAllSelected && <Check className="w-3 h-3 text-white" />}
-                              </button>
-                            </th>
-                            <th className="px-4 py-4 w-48">SKU Code</th>
-                            <th className="px-10 py-4">Description</th>
-                            <th className="px-10 py-4 w-64">Category</th>
-                            <th className="px-10 py-4 w-32 text-right">Qty</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-pink-50">{paginatedItems.map(item => (
-                          <tr key={item.id} className={`transition-colors group ${selectedItems.has(item.id) ? 'bg-pink-50/60 hover:bg-pink-100/60' : 'hover:bg-pink-50/20'}`}>
-                            <td className="pl-10 pr-4 py-2">
-                              <button 
-                                onClick={() => toggleSelection(item.id)}
-                                className={`w-4 h-4 rounded-lg border-2 flex items-center justify-center transition-all ${selectedItems.has(item.id) ? 'bg-pink-600 border-pink-600' : 'border-slate-200 group-hover:border-pink-300'}`}
-                              >
-                                {selectedItems.has(item.id) && <Check className="w-3 h-3 text-white" />}
-                              </button>
-                            </td>
-                            <td className="px-4 py-2 font-mono text-[11px] text-pink-600 font-black tracking-tight">{item.code}</td>
-                            <td className="px-10 py-2"><p className="text-xs font-bold text-slate-800 line-clamp-2 leading-relaxed">{item.description}</p></td>
-                            <td className="px-10 py-2">
-                              <div className="relative group/sel">
-                                <select 
-                                  value={item.category} 
-                                  onChange={(e) => handleCategoryChange(item.id, e.target.value)} 
-                                  className="w-full bg-pink-50/50 hover:bg-white hover:ring-2 hover:ring-pink-500/20 text-pink-700 text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-xl appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-pink-500 transition-all border border-transparent hover:border-pink-100 shadow-sm"
-                                >
-                                  {availableCategories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
-                                  <option value="__NEW__" className="text-pink-400 font-bold">+ New Category</option>
-                                </select>
-                                <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-3 h-3 text-pink-400 pointer-events-none group-hover/sel:text-pink-600" />
-                              </div>
-                            </td>
-                            <td className={`px-10 py-2 text-right font-black text-xs ${item.qty <= 0 ? 'text-rose-500' : 'text-slate-800'}`}>{item.qty}</td>
-                          </tr>
-                        ))}</tbody></table>
-                    </div>
-                    {filteredItems.length > 0 && (
-                      <div className="mt-auto px-10 py-8 bg-pink-50/10 flex flex-col sm:flex-row items-center justify-between gap-6 flex-shrink-0">
-                        <p className="text-sm text-slate-400 font-bold uppercase tracking-widest">Page <span className="text-pink-600 font-black">{currentPage}</span> / <span className="text-slate-800 font-black">{totalPages}</span></p>
-                        <div className="flex items-center gap-3">
-                          <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="p-4 rounded-[1.5rem] border border-pink-100 bg-white hover:bg-pink-50 disabled:opacity-30 transition-all shadow-sm"><ChevronLeft className="w-5 h-5 text-pink-600" /></button>
-                          <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="p-4 rounded-[1.5rem] border border-pink-100 bg-white hover:bg-pink-50 disabled:opacity-30 transition-all shadow-sm"><ChevronRight className="w-5 h-5 text-pink-600" /></button>
-                        </div>
-                      </div>
-                    )}
                   </div>
-                )}
-              </>
-            )}
-          </div>
+                  <div className="flex-1 overflow-auto min-h-0 custom-scrollbar">
+                    <table className="w-full text-left table-fixed min-w-[700px] sm:min-w-[1000px]">
+                      <thead className="sticky top-0 bg-white z-20 shadow-sm">
+                        <tr className="text-slate-400 text-[9px] sm:text-[10px] uppercase tracking-[0.2em] sm:tracking-[0.3em] font-black border-b border-pink-50">
+                          <th className="pl-4 sm:pl-10 pr-2 py-2 sm:py-4 w-12 sm:w-16">
+                            <button onClick={toggleAll} className={`w-3.5 h-3.5 sm:w-4 sm:h-4 rounded-md sm:rounded-lg border-2 flex items-center justify-center transition-all ${isAllSelected ? 'bg-pink-600 border-pink-600' : 'border-slate-300 hover:border-pink-400'}`}>
+                              {isAllSelected && <Check className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-white" />}
+                            </button>
+                          </th>
+                          <th className="px-2 sm:px-4 py-2 sm:py-4 w-32 sm:w-40">SKU Code</th>
+                          <th className="px-2 sm:px-6 py-2 sm:py-4">Description</th>
+                          <th className="px-2 sm:px-6 py-2 sm:py-4 w-40 sm:w-48">Category</th>
+                          <th className="px-2 sm:px-6 py-2 sm:py-4 w-32 sm:w-48">Zone</th>
+                          <th className="px-2 sm:px-6 py-2 sm:py-4 w-20 sm:w-28 text-right">Qty</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-pink-50">{paginatedItems.map(item => (
+                        <tr key={item.id} className={`transition-colors group ${selectedItems.has(item.id) ? 'bg-pink-50/60' : 'hover:bg-pink-50/20'}`}>
+                          <td className="pl-4 sm:pl-10 pr-2 py-1.5 sm:py-2">
+                            <button onClick={() => toggleSelection(item.id)} className={`w-3.5 h-3.5 sm:w-4 sm:h-4 rounded-md sm:rounded-lg border-2 flex items-center justify-center transition-all ${selectedItems.has(item.id) ? 'bg-pink-600 border-pink-600' : 'border-slate-200 group-hover:border-pink-300'}`}>
+                              {selectedItems.has(item.id) && <Check className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-white" />}
+                            </button>
+                          </td>
+                          <td className="px-2 sm:px-4 py-1.5 sm:py-2 font-mono text-[10px] sm:text-[11px] text-pink-600 font-black tracking-tight">{item.code}</td>
+                          <td className="px-2 sm:px-6 py-1.5 sm:py-2"><p className="text-[10px] sm:text-xs font-bold text-slate-800 line-clamp-2 leading-tight">{item.description}</p></td>
+                          <td className="px-2 sm:px-6 py-1.5 sm:py-2">
+                             <select value={item.category} onChange={(e) => handleFieldChange(item.id, 'category', e.target.value)} className="w-full bg-pink-50/40 hover:bg-white text-pink-700 text-[9px] sm:text-[10px] font-black uppercase tracking-wider px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg sm:rounded-xl appearance-none cursor-pointer border border-transparent hover:border-pink-100 shadow-sm outline-none truncate">
+                               {availableCategories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                               <option value="__NEW__" className="text-pink-400 font-bold">+ New</option>
+                             </select>
+                          </td>
+                          <td className="px-2 sm:px-6 py-1.5 sm:py-2">
+                             <select value={item.zone} onChange={(e) => handleFieldChange(item.id, 'zone', e.target.value)} className="w-full bg-slate-50 hover:bg-white text-slate-700 text-[9px] sm:text-[10px] font-black uppercase tracking-wider px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg sm:rounded-xl appearance-none cursor-pointer border border-transparent hover:border-slate-200 shadow-sm outline-none truncate">
+                               {availableZones.map(z => <option key={z} value={z}>{z}</option>)}
+                               <option value="__NEW__" className="text-pink-400 font-bold">+ New</option>
+                             </select>
+                          </td>
+                          <td className={`px-2 sm:px-6 py-1.5 sm:py-2 text-right font-black text-[10px] sm:text-xs ${item.qty <= 0 ? 'text-rose-500' : 'text-slate-800'}`}>{item.qty}</td>
+                        </tr>
+                      ))}</tbody></table>
+                  </div>
+                  {filteredItems.length > 0 && (
+                    <div className="mt-auto px-4 sm:px-10 py-4 sm:py-8 bg-pink-50/10 flex flex-row items-center justify-between gap-4 flex-shrink-0 border-t border-pink-50">
+                      <p className="text-[10px] sm:text-sm text-slate-400 font-bold uppercase tracking-widest whitespace-nowrap">Page <span className="text-pink-600 font-black">{currentPage}</span> / <span className="text-slate-800 font-black">{totalPages}</span></p>
+                      <div className="flex items-center gap-2 sm:gap-3">
+                        <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="p-2 sm:p-4 rounded-xl sm:rounded-[1.5rem] border border-pink-100 bg-white disabled:opacity-30 hover:bg-pink-50 transition-colors"><ChevronLeft className="w-4 sm:w-5 h-4 sm:h-5 text-pink-600" /></button>
+                        <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="p-2 sm:p-4 rounded-xl sm:rounded-[1.5rem] border border-pink-100 bg-white disabled:opacity-30 hover:bg-pink-50 transition-colors"><ChevronRight className="w-4 sm:w-5 h-4 sm:h-5 text-pink-600" /></button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
+          )}
         </div>
       </main>
+      
+      {/* Settings/Export Modals */}
+      {isExportModalOpen && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-3xl w-full max-w-2xl p-6 sm:p-8 shadow-2xl border border-pink-100 flex flex-col max-h-[90vh]">
+            <div className="flex justify-between items-center mb-6 sm:mb-8">
+              <div><h3 className="text-xl sm:text-2xl font-black text-slate-800 tracking-tight">Export Inventory</h3><p className="text-slate-500 text-xs sm:text-sm font-medium">Select your preferred file format</p></div>
+              <button onClick={() => setIsExportModalOpen(false)} className="p-2 rounded-full hover:bg-slate-100"><X className="w-5 sm:w-6 h-5 sm:h-6 text-slate-400" /></button>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 sm:gap-4 mb-6 sm:mb-8">
+              <button onClick={() => setExportFormat('standard')} className={`relative p-4 sm:p-6 rounded-2xl border-2 text-left transition-all ${exportFormat === 'standard' ? 'border-pink-500 bg-pink-50/50' : 'border-slate-100 hover:bg-slate-50'}`}>
+                <FileText className={`w-8 sm:w-10 h-8 sm:h-10 mb-3 sm:mb-4 ${exportFormat === 'standard' ? 'text-pink-500' : 'text-slate-300'}`} />
+                <h4 className="font-black text-xs sm:text-sm uppercase tracking-wide mb-1 sm:mb-2">Standard CSV</h4>
+                <p className="text-[10px] sm:text-xs text-slate-500 leading-tight">Flat list format including Zone information.</p>
+              </button>
+              <button onClick={() => setExportFormat('categorized')} className={`relative p-4 sm:p-6 rounded-2xl border-2 text-left transition-all ${exportFormat === 'categorized' ? 'border-pink-500 bg-pink-50/50' : 'border-slate-100 hover:bg-slate-50'}`}>
+                <FileSpreadsheet className={`w-8 sm:w-10 h-8 sm:h-10 mb-3 sm:mb-4 ${exportFormat === 'categorized' ? 'text-pink-500' : 'text-slate-300'}`} />
+                <h4 className="font-black text-xs sm:text-sm uppercase tracking-wide mb-1 sm:mb-2">Categorized Excel</h4>
+                <p className="text-[10px] sm:text-xs text-slate-500 leading-tight">Formatted report with zone locations listed.</p>
+              </button>
+            </div>
+            <div className="flex gap-3 sm:gap-4 pt-4 border-t border-slate-100">
+              <button onClick={() => setIsExportModalOpen(false)} className="flex-1 py-3 text-slate-500 font-bold hover:bg-slate-50 rounded-xl text-xs sm:text-sm">Cancel</button>
+              <button onClick={handleDownload} className="flex-[2] py-3 bg-pink-600 hover:bg-pink-700 text-white font-bold rounded-xl flex items-center justify-center gap-2 text-xs sm:text-sm">
+                <Download className="w-3.5 sm:w-4 h-3.5 sm:h-4" /> Download File
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isSyncModalOpen && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-pink-900/40 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-3xl w-full max-w-md p-6 sm:p-8 shadow-2xl border border-pink-100">
+            <div className="flex justify-between items-center mb-6"><h3 className="text-lg sm:text-xl font-bold text-pink-800 flex items-center gap-2"><Github className="w-5 sm:w-6 h-5 sm:h-6" />GitHub Sync</h3><button onClick={() => setIsSyncModalOpen(false)} className="text-pink-300 hover:text-pink-600"><X className="w-5 h-5" /></button></div>
+            <div className="space-y-4">
+              <div><label className="text-[10px] font-bold text-pink-400 uppercase tracking-widest block mb-1">Token</label><input type="password" placeholder="ghp_..." className="w-full px-4 py-3 bg-pink-50 rounded-xl outline-none text-xs sm:text-sm" value={ghConfig.token} onChange={(e) => setGhConfig({...ghConfig, token: e.target.value})} /></div>
+              <div><label className="text-[10px] font-bold text-pink-400 uppercase tracking-widest block mb-1">Repo (user/repo)</label><input type="text" placeholder="user/repo" className="w-full px-4 py-3 bg-pink-50 rounded-xl outline-none text-xs sm:text-sm" value={ghConfig.repo} onChange={(e) => setGhConfig({...ghConfig, repo: e.target.value})} /></div>
+            </div>
+            <div className="mt-8 flex gap-3"><button onClick={() => setIsSyncModalOpen(false)} className="flex-1 py-3 text-pink-600 font-bold hover:bg-pink-50 rounded-xl text-xs sm:text-sm">Cancel</button><button onClick={() => { setIsSyncModalOpen(false); syncToGitHub(); }} className="flex-1 py-3 bg-pink-600 text-white font-bold rounded-xl shadow-xl shadow-pink-600/20 flex items-center justify-center gap-2 text-xs sm:text-sm"><Save className="w-4 h-4" />Save</button></div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
 
 const StatCard: React.FC<{title: string; value: number; icon: React.ReactNode; color: string; subtitle?: string}> = ({ title, value, icon, color, subtitle }) => {
-  const map: any = { 
-    pink: 'bg-pink-50 text-pink-600 border-pink-100', 
-    rose: 'bg-rose-50 text-rose-600 border-rose-100', 
-    fuchsia: 'bg-fuchsia-50 text-fuchsia-600 border-fuchsia-100' 
-  };
+  const map: any = { pink: 'bg-pink-50 text-pink-600 border-pink-100', rose: 'bg-rose-50 text-rose-600 border-rose-100', fuchsia: 'bg-fuchsia-50 text-fuchsia-600 border-fuchsia-100' };
   return (
-    <div className="bg-white p-8 rounded-[2.5rem] border border-white shadow-xl shadow-pink-900/5 hover:shadow-pink-900/10 hover:-translate-y-1.5 transition-all duration-500 group">
-      <div className="flex items-center justify-between mb-6">
-        <div className={`p-4 rounded-2xl ${map[color] || map.pink} border transition-transform duration-500 group-hover:scale-110 group-hover:rotate-6`}>
-          {React.cloneElement(icon as any, { className: 'w-7 h-7' })}
-        </div>
-        {subtitle && <span className="text-[10px] font-black uppercase tracking-[0.2em] text-pink-300">{subtitle}</span>}
+    <div className="bg-white p-5 sm:p-8 rounded-[1.5rem] sm:rounded-[2.5rem] border border-white shadow-xl hover:-translate-y-1.5 transition-all duration-500 group">
+      <div className="flex items-center justify-between mb-4 sm:mb-6">
+        <div className={`p-3 sm:p-4 rounded-xl sm:rounded-2xl ${map[color] || map.pink} border transition-transform duration-500 group-hover:scale-110 group-hover:rotate-6`}>{React.cloneElement(icon as any, { className: 'w-5 sm:w-7 h-5 sm:h-7' })}</div>
+        {subtitle && <span className="text-[9px] sm:text-[10px] font-black uppercase tracking-[0.1em] sm:tracking-[0.2em] text-pink-300">{subtitle}</span>}
       </div>
-      <p className="text-slate-400 text-[10px] font-black uppercase tracking-[0.2em] mb-2">{title}</p>
-      <p className="text-4xl font-black text-slate-800 tracking-tighter">{value.toLocaleString()}</p>
+      <p className="text-slate-400 text-[9px] sm:text-[10px] font-black uppercase tracking-[0.1em] sm:tracking-[0.2em] mb-1 sm:mb-2">{title}</p>
+      <p className="text-2xl sm:text-4xl font-black text-slate-800 tracking-tighter">{value.toLocaleString()}</p>
     </div>
   );
 };

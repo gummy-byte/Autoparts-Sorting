@@ -5,6 +5,7 @@ export interface InventoryItem {
   code: string;
   description: string;
   category: string;
+  zone: string;
 }
 
 export enum ItemCategory {
