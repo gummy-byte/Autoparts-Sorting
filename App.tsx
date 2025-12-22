@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { 
   LayoutDashboard, 
   Package, 
@@ -33,7 +33,10 @@ import {
   Tag,
   Database,
   Trash2,
-  MapPin
+  MapPin,
+  Settings2,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -63,6 +66,13 @@ interface GitHubConfig {
   repo: string;
   path: string;
   branch: string;
+}
+
+interface ColumnVisibility {
+  category: boolean;
+  zone: boolean;
+  qty: boolean;
+  description: boolean;
 }
 
 // IndexedDB Helpers
@@ -167,6 +177,14 @@ const App: React.FC = () => {
   const [syncStatus, setSyncStatus] = useState<'idle' | 'success' | 'error'>('idle');
   const [isCleanupPromptOpen, setIsCleanupPromptOpen] = useState(false);
   
+  const [visibleColumns, setVisibleColumns] = useState<ColumnVisibility>(() => {
+    const saved = localStorage.getItem('visible_columns');
+    return saved ? JSON.parse(saved) : { category: true, zone: true, qty: true, description: true };
+  });
+
+  const [isColumnDropdownOpen, setIsColumnDropdownOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
   const [ghConfig, setGhConfig] = useState<GitHubConfig>(() => {
     const saved = localStorage.getItem('gh_config');
     return saved ? JSON.parse(saved) : { token: '', repo: '', path: 'inventory_categorized.csv', branch: 'main' };
@@ -200,9 +218,24 @@ const App: React.FC = () => {
   }, [ghConfig]);
 
   useEffect(() => {
+    localStorage.setItem('visible_columns', JSON.stringify(visibleColumns));
+  }, [visibleColumns]);
+
+  useEffect(() => {
     setCurrentPage(1);
     setSelectedItems(new Set()); 
   }, [searchTerm, selectedCategory, selectedZone]);
+
+  // Click outside listener for column dropdown
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsColumnDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   const processCSV = (text: string) => {
     const lines = text.split(/\r?\n/).filter(line => line.trim().length > 0);
@@ -348,6 +381,10 @@ const App: React.FC = () => {
     setSelectedItems(newSet);
   };
 
+  const toggleColumn = (col: keyof ColumnVisibility) => {
+    setVisibleColumns(prev => ({ ...prev, [col]: !prev[col] }));
+  };
+
   const generateStandardCSV = () => {
     const headers = ["Quantity", "Code", "Description", "Category", "Zone"];
     const rows = items.map(item => [item.qty, `"${item.code}"`, `"${item.description}"`, `"${item.category}"`, `"${item.zone}"`]);
@@ -463,10 +500,17 @@ const App: React.FC = () => {
   }, [items]);
 
   const filteredItems = useMemo(() => {
+    const searchTokens = searchTerm.toLowerCase().split(/\s+/).filter(t => t.length > 0);
+    
     return items.filter(item => {
-      const matchS = item.description.toLowerCase().includes(searchTerm.toLowerCase()) || item.code.toLowerCase().includes(searchTerm.toLowerCase());
+      const itemText = (item.description + " " + item.code).toLowerCase();
+      
+      // Match all search tokens (AND search)
+      const matchS = searchTokens.every(token => itemText.includes(token));
+      
       const matchC = selectedCategory === "All" || item.category === selectedCategory;
       const matchZ = selectedZone === "All" || item.zone === selectedZone;
+      
       return matchS && matchC && matchZ;
     });
   }, [items, searchTerm, selectedCategory, selectedZone]);
@@ -687,7 +731,7 @@ const App: React.FC = () => {
                 </div>
               ) : (
                 <div className="bg-white rounded-[1.5rem] sm:rounded-[2.5rem] border border-white shadow-xl overflow-hidden flex flex-col h-full">
-                  <div className="p-4 sm:p-6 lg:p-8 border-b border-pink-50 flex flex-col lg:flex-row gap-3 sm:gap-5 justify-between bg-pink-50/10 flex-shrink-0">
+                  <div className="p-4 sm:p-6 lg:p-8 border-b border-pink-50 flex flex-col lg:flex-row gap-3 sm:gap-5 justify-between bg-pink-50/10 flex-shrink-0 relative z-30">
                     <div className="relative flex-[2] group">
                       <Search className="absolute left-4 sm:left-6 top-1/2 -translate-y-1/2 w-3.5 sm:w-4 h-3.5 sm:h-4 text-slate-400 group-focus-within:text-pink-500" />
                       <input type="text" placeholder="Search sku, name..." className="w-full pl-10 sm:pl-14 pr-4 sm:pr-8 py-3 sm:py-5 bg-white border-2 border-slate-100 rounded-xl sm:rounded-[1.5rem] focus:ring-4 focus:ring-pink-500/10 focus:border-pink-500 outline-none text-xs sm:text-sm font-bold shadow-sm" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
@@ -709,6 +753,32 @@ const App: React.FC = () => {
                         </select>
                         <ChevronDown className="absolute right-2 sm:right-6 top-1/2 -translate-y-1/2 w-3.5 sm:w-4 h-3.5 sm:h-4 text-slate-400 pointer-events-none" />
                       </div>
+                      <div className="relative" ref={dropdownRef}>
+                        <button onClick={() => setIsColumnDropdownOpen(!isColumnDropdownOpen)} className="p-3 sm:p-5 bg-white border-2 border-slate-100 rounded-xl sm:rounded-[1.5rem] hover:bg-slate-50 transition-all text-slate-400 hover:text-pink-600 shadow-sm">
+                          <Settings2 className="w-4 sm:w-5 h-4 sm:h-5" />
+                        </button>
+                        {isColumnDropdownOpen && (
+                          <div className="absolute right-0 mt-2 w-48 bg-white rounded-2xl shadow-2xl border border-pink-50 p-3 flex flex-col gap-1.5 animate-in slide-in-from-top-2 fade-in duration-200">
+                             <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 px-3 py-2">Visible Columns</p>
+                             <button onClick={() => toggleColumn('description')} className="flex items-center justify-between px-3 py-2 rounded-xl hover:bg-pink-50 transition-all group">
+                                <span className={`text-xs font-bold ${visibleColumns.description ? 'text-slate-800' : 'text-slate-400'}`}>Description</span>
+                                {visibleColumns.description ? <Eye className="w-3.5 h-3.5 text-pink-500" /> : <EyeOff className="w-3.5 h-3.5 text-slate-300" />}
+                             </button>
+                             <button onClick={() => toggleColumn('category')} className="flex items-center justify-between px-3 py-2 rounded-xl hover:bg-pink-50 transition-all group">
+                                <span className={`text-xs font-bold ${visibleColumns.category ? 'text-slate-800' : 'text-slate-400'}`}>Category</span>
+                                {visibleColumns.category ? <Eye className="w-3.5 h-3.5 text-pink-500" /> : <EyeOff className="w-3.5 h-3.5 text-slate-300" />}
+                             </button>
+                             <button onClick={() => toggleColumn('zone')} className="flex items-center justify-between px-3 py-2 rounded-xl hover:bg-pink-50 transition-all group">
+                                <span className={`text-xs font-bold ${visibleColumns.zone ? 'text-slate-800' : 'text-slate-400'}`}>Zone</span>
+                                {visibleColumns.zone ? <Eye className="w-3.5 h-3.5 text-pink-500" /> : <EyeOff className="w-3.5 h-3.5 text-slate-300" />}
+                             </button>
+                             <button onClick={() => toggleColumn('qty')} className="flex items-center justify-between px-3 py-2 rounded-xl hover:bg-pink-50 transition-all group">
+                                <span className={`text-xs font-bold ${visibleColumns.qty ? 'text-slate-800' : 'text-slate-400'}`}>Quantity</span>
+                                {visibleColumns.qty ? <Eye className="w-3.5 h-3.5 text-pink-500" /> : <EyeOff className="w-3.5 h-3.5 text-slate-300" />}
+                             </button>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                   <div className="flex-1 overflow-auto min-h-0 custom-scrollbar">
@@ -721,10 +791,10 @@ const App: React.FC = () => {
                             </button>
                           </th>
                           <th className="px-2 sm:px-4 py-2 sm:py-4 w-32 sm:w-40">SKU Code</th>
-                          <th className="px-2 sm:px-6 py-2 sm:py-4">Description</th>
-                          <th className="px-2 sm:px-6 py-2 sm:py-4 w-40 sm:w-48">Category</th>
-                          <th className="px-2 sm:px-6 py-2 sm:py-4 w-32 sm:w-48">Zone</th>
-                          <th className="px-2 sm:px-6 py-2 sm:py-4 w-20 sm:w-28 text-right">Qty</th>
+                          {visibleColumns.description && <th className="px-2 sm:px-6 py-2 sm:py-4">Description</th>}
+                          {visibleColumns.category && <th className="px-2 sm:px-6 py-2 sm:py-4 w-40 sm:w-48">Category</th>}
+                          {visibleColumns.zone && <th className="px-2 sm:px-6 py-2 sm:py-4 w-32 sm:w-48">Zone</th>}
+                          {visibleColumns.qty && <th className="px-2 sm:px-6 py-2 sm:py-4 w-20 sm:w-28 text-right">Qty</th>}
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-pink-50">{paginatedItems.map(item => (
@@ -735,25 +805,29 @@ const App: React.FC = () => {
                             </button>
                           </td>
                           <td className="px-2 sm:px-4 py-1.5 sm:py-2 font-mono text-[10px] sm:text-[11px] text-pink-600 font-black tracking-tight">{item.code}</td>
-                          <td className="px-2 sm:px-6 py-1.5 sm:py-2"><p className="text-[10px] sm:text-xs font-bold text-slate-800 leading-tight">{item.description}</p></td>
-                          <td className="px-2 sm:px-6 py-1.5 sm:py-2">
-                             <select value={item.category} onChange={(e) => handleFieldChange(item.id, 'category', e.target.value)} className="w-full bg-pink-50/40 hover:bg-white text-pink-700 text-[9px] sm:text-[10px] font-black uppercase tracking-wider px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg sm:rounded-xl appearance-none cursor-pointer border border-transparent hover:border-pink-100 shadow-sm outline-none truncate">
-                               {availableCategories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
-                               <option value="__NEW__" className="text-pink-400 font-bold">+ New</option>
-                             </select>
-                          </td>
-                          <td className="px-2 sm:px-6 py-1.5 sm:py-2">
-                             <select value={item.zone} onChange={(e) => handleFieldChange(item.id, 'zone', e.target.value)} className="w-full bg-slate-50 hover:bg-white text-slate-700 text-[9px] sm:text-[10px] font-black uppercase tracking-wider px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg sm:rounded-xl appearance-none cursor-pointer border border-transparent hover:border-slate-200 shadow-sm outline-none truncate">
-                               {availableZones.map(z => <option key={z} value={z}>{z}</option>)}
-                               <option value="__NEW__" className="text-pink-400 font-bold">+ New</option>
-                             </select>
-                          </td>
-                          <td className={`px-2 sm:px-6 py-1.5 sm:py-2 text-right font-black text-[10px] sm:text-xs ${item.qty <= 0 ? 'text-rose-500' : 'text-slate-800'}`}>{item.qty}</td>
+                          {visibleColumns.description && <td className="px-2 sm:px-6 py-1.5 sm:py-2"><p className="text-[10px] sm:text-xs font-bold text-slate-800 leading-tight">{item.description}</p></td>}
+                          {visibleColumns.category && (
+                            <td className="px-2 sm:px-6 py-1.5 sm:py-2">
+                               <select value={item.category} onChange={(e) => handleFieldChange(item.id, 'category', e.target.value)} className="w-full bg-pink-50/40 hover:bg-white text-pink-700 text-[9px] sm:text-[10px] font-black uppercase tracking-wider px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg sm:rounded-xl appearance-none cursor-pointer border border-transparent hover:border-pink-100 shadow-sm outline-none truncate">
+                                 {availableCategories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                                 <option value="__NEW__" className="text-pink-400 font-bold">+ New</option>
+                               </select>
+                            </td>
+                          )}
+                          {visibleColumns.zone && (
+                            <td className="px-2 sm:px-6 py-1.5 sm:py-2">
+                               <select value={item.zone} onChange={(e) => handleFieldChange(item.id, 'zone', e.target.value)} className="w-full bg-slate-50 hover:bg-white text-slate-700 text-[9px] sm:text-[10px] font-black uppercase tracking-wider px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg sm:rounded-xl appearance-none cursor-pointer border border-transparent hover:border-slate-200 shadow-sm outline-none truncate">
+                                 {availableZones.map(z => <option key={z} value={z}>{z}</option>)}
+                                 <option value="__NEW__" className="text-pink-400 font-bold">+ New</option>
+                               </select>
+                            </td>
+                          )}
+                          {visibleColumns.qty && <td className={`px-2 sm:px-6 py-1.5 sm:py-2 text-right font-black text-[10px] sm:text-xs ${item.qty <= 0 ? 'text-rose-500' : 'text-slate-800'}`}>{item.qty}</td>}
                         </tr>
                       ))}</tbody></table>
                   </div>
                   {filteredItems.length > 0 && (
-                    <div className="mt-auto px-4 sm:px-10 py-4 sm:py-8 bg-pink-50/10 flex flex-row items-center justify-between gap-4 flex-shrink-0 border-t border-pink-50">
+                    <div className="mt-auto px-4 sm:px-10 py-4 sm:py-8 bg-pink-50/10 flex flex-row items-center justify-between gap-4 flex-shrink-0 border-t border-pink-50 relative z-20">
                       <p className="text-[10px] sm:text-sm text-slate-400 font-bold uppercase tracking-widest whitespace-nowrap">Page <span className="text-pink-600 font-black">{currentPage}</span> / <span className="text-slate-800 font-black">{totalPages}</span></p>
                       <div className="flex items-center gap-2 sm:gap-3">
                         <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="p-2 sm:p-4 rounded-xl sm:rounded-[1.5rem] border border-pink-100 bg-white disabled:opacity-30 hover:bg-pink-50 transition-colors"><ChevronLeft className="w-4 sm:w-5 h-4 sm:h-5 text-pink-600" /></button>
