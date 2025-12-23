@@ -71,6 +71,7 @@ interface GitHubConfig {
 interface ColumnVisibility {
   category: boolean;
   zone: boolean;
+  zone2: boolean;
   qty: boolean;
   description: boolean;
 }
@@ -81,7 +82,7 @@ const STORE_NAME = 'InventoryStore';
 
 const initDB = (): Promise<IDBDatabase> => {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, 2); 
+    const request = indexedDB.open(DB_NAME, 3); // Bumped version for zone2
     request.onupgradeneeded = (event: any) => {
       const db = request.result;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
@@ -166,7 +167,7 @@ const App: React.FC = () => {
   const [availableZones, setAvailableZones] = useState<string[]>(["Unassigned", "Zone A", "Zone B", "Zone C"]);
   
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-  const [modalType, setModalType] = useState<'category' | 'zone'>('category');
+  const [modalType, setModalType] = useState<'category' | 'zone' | 'zone2'>('category');
   const [newName, setNewName] = useState("");
   const [modalTarget, setModalTarget] = useState<{ type: 'single' | 'bulk', id?: string } | null>(null);
 
@@ -179,7 +180,7 @@ const App: React.FC = () => {
   
   const [visibleColumns, setVisibleColumns] = useState<ColumnVisibility>(() => {
     const saved = localStorage.getItem('visible_columns');
-    return saved ? JSON.parse(saved) : { category: true, zone: true, qty: true, description: true };
+    return saved ? JSON.parse(saved) : { category: true, zone: true, zone2: true, qty: true, description: true };
   });
 
   const [isColumnDropdownOpen, setIsColumnDropdownOpen] = useState(false);
@@ -241,7 +242,7 @@ const App: React.FC = () => {
     const lines = text.split(/\r?\n/).filter(line => line.trim().length > 0);
     if (lines.length === 0) return;
 
-    let qtyIdx = -1, codeIdx = -1, descIdx = -1, catIdx = -1, zoneIdx = -1, headerLineIdx = -1;
+    let qtyIdx = -1, codeIdx = -1, descIdx = -1, catIdx = -1, zoneIdx = -1, zone2Idx = -1, headerLineIdx = -1;
     
     for (let i = 0; i < Math.min(lines.length, 10); i++) {
       const parts = parseCSVLine(lines[i]).map(p => p.toLowerCase());
@@ -249,10 +250,12 @@ const App: React.FC = () => {
       const fCode = parts.findIndex(p => p.includes('code') || p.includes('part') || p.includes('sku'));
       const fDesc = parts.findIndex(p => p.includes('desc') || p.includes('item') || p.includes('name'));
       const fCat = parts.findIndex(p => p.includes('category') || p.includes('type') || p.includes('group') || p === 'cat');
-      const fZone = parts.findIndex(p => p.includes('zone') || p.includes('location') || p.includes('area') || p === 'zn');
+      
+      const fZone = parts.findIndex(p => (p.includes('zone') || p.includes('location')) && !p.includes('2'));
+      const fZone2 = parts.findIndex(p => (p.includes('zone') || p.includes('location')) && p.includes('2'));
 
       if ((fQty !== -1 && fCode !== -1) || (fQty !== -1 && fDesc !== -1) || (fCode !== -1 && fDesc !== -1)) {
-        qtyIdx = fQty; codeIdx = fCode; descIdx = fDesc; catIdx = fCat; zoneIdx = fZone; headerLineIdx = i; break;
+        qtyIdx = fQty; codeIdx = fCode; descIdx = fDesc; catIdx = fCat; zoneIdx = fZone; zone2Idx = fZone2; headerLineIdx = i; break;
       }
     }
 
@@ -281,6 +284,11 @@ const App: React.FC = () => {
         zone = parts[zoneIdx].trim();
       }
 
+      let zone2 = "Unassigned";
+      if (zone2Idx !== -1 && parts[zone2Idx]) {
+        zone2 = parts[zone2Idx].trim();
+      }
+
       if (!category || category.toLowerCase() === 'null') {
         category = classifyItem(description);
       } else {
@@ -290,6 +298,9 @@ const App: React.FC = () => {
       if (zone.trim() && zone.toLowerCase() !== 'null' && zone !== 'Unassigned') {
         newZones.add(zone.trim());
       }
+      if (zone2.trim() && zone2.toLowerCase() !== 'null' && zone2 !== 'Unassigned') {
+        newZones.add(zone2.trim());
+      }
       
       parsedItems.push({
         id: `${code}-${i}-${Math.random().toString(36).substr(2, 5)}`,
@@ -297,7 +308,8 @@ const App: React.FC = () => {
         code: code || "UNKNOWN",
         description: description || "Untitled Part",
         category,
-        zone: zone || "Unassigned"
+        zone: zone || "Unassigned",
+        zone2: zone2 || "Unassigned"
       });
     }
 
@@ -326,7 +338,7 @@ const App: React.FC = () => {
     setIsCleanupPromptOpen(false);
   };
 
-  const openAddModal = (type: 'category' | 'zone', mode: 'single' | 'bulk', id?: string) => {
+  const openAddModal = (type: 'category' | 'zone' | 'zone2', mode: 'single' | 'bulk', id?: string) => {
     setModalType(type);
     setModalTarget({ type: mode, id });
     setNewName("");
@@ -345,11 +357,13 @@ const App: React.FC = () => {
         setItems(prev => prev.map(item => item.id === modalTarget.id ? { ...item, category: name } : item));
       }
     } else {
+      // Handles both zone and zone2 field updates
+      const fieldToUpdate = modalType === 'zone2' ? 'zone2' : 'zone';
       setAvailableZones(prev => prev.includes(name) ? prev : [...prev, name].sort());
       if (modalTarget?.type === 'bulk') {
-        setItems(prev => prev.map(item => selectedItems.has(item.id) ? { ...item, zone: name } : item));
+        setItems(prev => prev.map(item => selectedItems.has(item.id) ? { ...item, [fieldToUpdate]: name } : item));
       } else if (modalTarget?.id) {
-        setItems(prev => prev.map(item => item.id === modalTarget.id ? { ...item, zone: name } : item));
+        setItems(prev => prev.map(item => item.id === modalTarget.id ? { ...item, [fieldToUpdate]: name } : item));
       }
     }
 
@@ -357,7 +371,7 @@ const App: React.FC = () => {
     setIsAddModalOpen(false);
   };
 
-  const handleFieldChange = (id: string, field: 'category' | 'zone', value: string) => {
+  const handleFieldChange = (id: string, field: 'category' | 'zone' | 'zone2', value: string) => {
     if (value === '__NEW__') {
       openAddModal(field, 'single', id);
     } else {
@@ -365,7 +379,7 @@ const App: React.FC = () => {
     }
   };
 
-  const handleBulkFieldChange = (field: 'category' | 'zone', value: string) => {
+  const handleBulkFieldChange = (field: 'category' | 'zone' | 'zone2', value: string) => {
     if (value === '__NEW__') {
       openAddModal(field, 'bulk');
     } else {
@@ -386,8 +400,8 @@ const App: React.FC = () => {
   };
 
   const generateStandardCSV = () => {
-    const headers = ["Quantity", "Code", "Description", "Category", "Zone"];
-    const rows = items.map(item => [item.qty, `"${item.code}"`, `"${item.description}"`, `"${item.category}"`, `"${item.zone}"`]);
+    const headers = ["Quantity", "Code", "Description", "Category", "Zone 1", "Zone 2"];
+    const rows = items.map(item => [item.qty, `"${item.code}"`, `"${item.description}"`, `"${item.category}"`, `"${item.zone}"`, `"${item.zone2}"`]);
     return [headers, ...rows].map(e => e.join(",")).join("\n");
   };
 
@@ -419,7 +433,8 @@ const App: React.FC = () => {
               <th style="width: 50px">No</th>
               <th style="width: 150px">Code</th>
               <th style="width: 400px">Description</th>
-              <th style="width: 120px">Zone</th>
+              <th style="width: 120px">Zone 1</th>
+              <th style="width: 120px">Zone 2</th>
               <th style="width: 80px">Qty</th>
             </tr>
           </thead>
@@ -427,9 +442,9 @@ const App: React.FC = () => {
     `;
 
     sortedCategories.forEach(cat => {
-      html += `<tr><td colspan="5" class="category-header">${cat.toUpperCase()}</td></tr>`;
+      html += `<tr><td colspan="6" class="category-header">${cat.toUpperCase()}</td></tr>`;
       grouped[cat].forEach(item => {
-        html += `<tr><td>${globalIndex}</td><td>${item.code}</td><td>${item.description}</td><td>${item.zone}</td><td class="qty-col">${item.qty}</td></tr>`;
+        html += `<tr><td>${globalIndex}</td><td>${item.code}</td><td>${item.description}</td><td>${item.zone}</td><td>${item.zone2}</td><td class="qty-col">${item.qty}</td></tr>`;
         globalIndex++;
       });
     });
@@ -509,7 +524,7 @@ const App: React.FC = () => {
       const matchS = searchTokens.every(token => itemText.includes(token));
       
       const matchC = selectedCategory === "All" || item.category === selectedCategory;
-      const matchZ = selectedZone === "All" || item.zone === selectedZone;
+      const matchZ = selectedZone === "All" || item.zone === selectedZone || item.zone2 === selectedZone;
       
       return matchS && matchC && matchZ;
     });
@@ -603,7 +618,15 @@ const App: React.FC = () => {
                 </div>
                 <div className="relative">
                   <select className="appearance-none bg-slate-800 border border-slate-700 hover:border-pink-500 rounded-xl px-4 py-2 pr-8 text-[10px] sm:text-xs font-bold focus:ring-2 focus:ring-pink-500/50 outline-none transition-all cursor-pointer min-w-[80px]" onChange={(e) => handleBulkFieldChange('zone', e.target.value)} value="">
-                      <option value="" disabled>Zone...</option>
+                      <option value="" disabled>Zone 1...</option>
+                      {availableZones.map(z => <option key={z} value={z}>{z}</option>)}
+                      <option value="__NEW__" className="text-pink-400 font-bold">+ New</option>
+                  </select>
+                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
+                </div>
+                <div className="relative">
+                  <select className="appearance-none bg-slate-800 border border-slate-700 hover:border-pink-500 rounded-xl px-4 py-2 pr-8 text-[10px] sm:text-xs font-bold focus:ring-2 focus:ring-pink-500/50 outline-none transition-all cursor-pointer min-w-[80px]" onChange={(e) => handleBulkFieldChange('zone2', e.target.value)} value="">
+                      <option value="" disabled>Zone 2...</option>
                       {availableZones.map(z => <option key={z} value={z}>{z}</option>)}
                       <option value="__NEW__" className="text-pink-400 font-bold">+ New</option>
                   </select>
@@ -681,8 +704,8 @@ const App: React.FC = () => {
                 <div className="absolute inset-0 bg-pink-500 blur-3xl opacity-20 animate-pulse"></div>
                 <div className="relative bg-white p-8 sm:p-10 rounded-[2rem] sm:rounded-[3rem] shadow-2xl border border-pink-50"><Sparkles className="w-10 sm:w-12 h-10 sm:h-12 text-pink-500" /></div>
               </div>
-              <h3 className="text-2xl sm:text-3xl font-black text-slate-800 mb-3 sm:mb-4 tracking-tight">Protect Your Progress</h3>
-              <p className="text-slate-500 mb-8 sm:mb-10 leading-relaxed text-base sm:text-lg font-medium">AutoPart now supports Zones! Track warehouse locations alongside categories. All changes are saved automatically.</p>
+              <h3 className="text-2xl sm:text-3xl font-black text-slate-800 mb-3 sm:mb-4 tracking-tight">Warehouse Logistics</h3>
+              <p className="text-slate-500 mb-8 sm:mb-10 leading-relaxed text-base sm:text-lg font-medium">AutoPart now supports dual Zones! Categorize your inventory and track multiple warehouse locations with ease.</p>
               <div className="flex flex-col sm:flex-row gap-4 w-full justify-center">
                 <label className="px-6 sm:px-8 py-3.5 sm:py-4 bg-pink-600 text-white font-black rounded-2xl sm:rounded-[1.5rem] hover:bg-pink-700 transition-all shadow-xl shadow-pink-600/20 cursor-pointer text-center">Upload CSV File <input type="file" className="hidden" accept=".csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) { const r = new FileReader(); r.onload = (e) => processCSV(e.target?.result as string); r.readAsText(f); } }} /></label>
               </div>
@@ -769,8 +792,12 @@ const App: React.FC = () => {
                                 {visibleColumns.category ? <Eye className="w-3.5 h-3.5 text-pink-500" /> : <EyeOff className="w-3.5 h-3.5 text-slate-300" />}
                              </button>
                              <button onClick={() => toggleColumn('zone')} className="flex items-center justify-between px-3 py-2 rounded-xl hover:bg-pink-50 transition-all group">
-                                <span className={`text-xs font-bold ${visibleColumns.zone ? 'text-slate-800' : 'text-slate-400'}`}>Zone</span>
+                                <span className={`text-xs font-bold ${visibleColumns.zone ? 'text-slate-800' : 'text-slate-400'}`}>Zone 1</span>
                                 {visibleColumns.zone ? <Eye className="w-3.5 h-3.5 text-pink-500" /> : <EyeOff className="w-3.5 h-3.5 text-slate-300" />}
+                             </button>
+                             <button onClick={() => toggleColumn('zone2')} className="flex items-center justify-between px-3 py-2 rounded-xl hover:bg-pink-50 transition-all group">
+                                <span className={`text-xs font-bold ${visibleColumns.zone2 ? 'text-slate-800' : 'text-slate-400'}`}>Zone 2</span>
+                                {visibleColumns.zone2 ? <Eye className="w-3.5 h-3.5 text-pink-500" /> : <EyeOff className="w-3.5 h-3.5 text-slate-300" />}
                              </button>
                              <button onClick={() => toggleColumn('qty')} className="flex items-center justify-between px-3 py-2 rounded-xl hover:bg-pink-50 transition-all group">
                                 <span className={`text-xs font-bold ${visibleColumns.qty ? 'text-slate-800' : 'text-slate-400'}`}>Quantity</span>
@@ -782,7 +809,7 @@ const App: React.FC = () => {
                     </div>
                   </div>
                   <div className="flex-1 overflow-auto min-h-0 custom-scrollbar">
-                    <table className="w-full text-left table-fixed min-w-[700px] sm:min-w-[1000px]">
+                    <table className="w-full text-left table-fixed min-w-[700px] sm:min-w-[1200px]">
                       <thead className="sticky top-0 bg-white z-20 shadow-sm">
                         <tr className="text-slate-400 text-[9px] sm:text-[10px] uppercase tracking-[0.2em] sm:tracking-[0.3em] font-black border-b border-pink-50">
                           <th className="pl-4 sm:pl-10 pr-2 py-2 sm:py-4 w-12 sm:w-16">
@@ -793,7 +820,8 @@ const App: React.FC = () => {
                           <th className="px-2 sm:px-4 py-2 sm:py-4 w-32 sm:w-40">SKU Code</th>
                           {visibleColumns.description && <th className="px-2 sm:px-6 py-2 sm:py-4">Description</th>}
                           {visibleColumns.category && <th className="px-2 sm:px-6 py-2 sm:py-4 w-40 sm:w-48">Category</th>}
-                          {visibleColumns.zone && <th className="px-2 sm:px-6 py-2 sm:py-4 w-32 sm:w-48">Zone</th>}
+                          {visibleColumns.zone && <th className="px-2 sm:px-6 py-2 sm:py-4 w-32 sm:w-48">Zone 1</th>}
+                          {visibleColumns.zone2 && <th className="px-2 sm:px-6 py-2 sm:py-4 w-32 sm:w-48">Zone 2</th>}
                           {visibleColumns.qty && <th className="px-2 sm:px-6 py-2 sm:py-4 w-20 sm:w-28 text-right">Qty</th>}
                         </tr>
                       </thead>
@@ -817,6 +845,14 @@ const App: React.FC = () => {
                           {visibleColumns.zone && (
                             <td className="px-2 sm:px-6 py-1.5 sm:py-2">
                                <select value={item.zone} onChange={(e) => handleFieldChange(item.id, 'zone', e.target.value)} className="w-full bg-slate-50 hover:bg-white text-slate-700 text-[9px] sm:text-[10px] font-black uppercase tracking-wider px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg sm:rounded-xl appearance-none cursor-pointer border border-transparent hover:border-slate-200 shadow-sm outline-none truncate">
+                                 {availableZones.map(z => <option key={z} value={z}>{z}</option>)}
+                                 <option value="__NEW__" className="text-pink-400 font-bold">+ New</option>
+                               </select>
+                            </td>
+                          )}
+                          {visibleColumns.zone2 && (
+                            <td className="px-2 sm:px-6 py-1.5 sm:py-2">
+                               <select value={item.zone2} onChange={(e) => handleFieldChange(item.id, 'zone2', e.target.value)} className="w-full bg-slate-50/70 hover:bg-white text-slate-700 text-[9px] sm:text-[10px] font-black uppercase tracking-wider px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg sm:rounded-xl appearance-none cursor-pointer border border-transparent hover:border-slate-200 shadow-sm outline-none truncate">
                                  {availableZones.map(z => <option key={z} value={z}>{z}</option>)}
                                  <option value="__NEW__" className="text-pink-400 font-bold">+ New</option>
                                </select>
@@ -854,12 +890,12 @@ const App: React.FC = () => {
               <button onClick={() => setExportFormat('standard')} className={`relative p-4 sm:p-6 rounded-2xl border-2 text-left transition-all ${exportFormat === 'standard' ? 'border-pink-500 bg-pink-50/50' : 'border-slate-100 hover:bg-slate-50'}`}>
                 <FileText className={`w-8 sm:w-10 h-8 sm:h-10 mb-3 sm:mb-4 ${exportFormat === 'standard' ? 'text-pink-500' : 'text-slate-300'}`} />
                 <h4 className="font-black text-xs sm:text-sm uppercase tracking-wide mb-1 sm:mb-2">Standard CSV</h4>
-                <p className="text-[10px] sm:text-xs text-slate-500 leading-tight">Flat list format including Zone information.</p>
+                <p className="text-[10px] sm:text-xs text-slate-500 leading-tight">Flat list format including both Zone fields.</p>
               </button>
               <button onClick={() => setExportFormat('categorized')} className={`relative p-4 sm:p-6 rounded-2xl border-2 text-left transition-all ${exportFormat === 'categorized' ? 'border-pink-500 bg-pink-50/50' : 'border-slate-100 hover:bg-slate-50'}`}>
                 <FileSpreadsheet className={`w-8 sm:w-10 h-8 sm:h-10 mb-3 sm:mb-4 ${exportFormat === 'categorized' ? 'text-pink-500' : 'text-slate-300'}`} />
                 <h4 className="font-black text-xs sm:text-sm uppercase tracking-wide mb-1 sm:mb-2">Categorized Excel</h4>
-                <p className="text-[10px] sm:text-xs text-slate-500 leading-tight">Formatted report with zone locations listed.</p>
+                <p className="text-[10px] sm:text-xs text-slate-500 leading-tight">Formatted report with all zone locations listed.</p>
               </button>
             </div>
             <div className="flex gap-3 sm:gap-4 pt-4 border-t border-slate-100">
