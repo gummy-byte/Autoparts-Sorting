@@ -36,7 +36,8 @@ import {
   MapPin,
   Settings2,
   Eye,
-  EyeOff
+  EyeOff,
+  Minus
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -82,7 +83,7 @@ const STORE_NAME = 'InventoryStore';
 
 const initDB = (): Promise<IDBDatabase> => {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, 3); // Bumped version for zone2
+    const request = indexedDB.open(DB_NAME, 3);
     request.onupgradeneeded = (event: any) => {
       const db = request.result;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
@@ -167,9 +168,12 @@ const App: React.FC = () => {
   const [availableZones, setAvailableZones] = useState<string[]>(["Unassigned", "Zone A", "Zone B", "Zone C"]);
   
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-  const [modalType, setModalType] = useState<'category' | 'zone' | 'zone2'>('category');
+  const [modalType, setModalType] = useState<'category' | 'zone' | 'zone2' | 'new_item'>('category');
   const [newName, setNewName] = useState("");
   const [modalTarget, setModalTarget] = useState<{ type: 'single' | 'bulk', id?: string } | null>(null);
+
+  // New Item State
+  const [newItemData, setNewItemData] = useState({ code: '', description: '', category: '', zone: 'Unassigned', zone2: 'Unassigned', qty: 0 });
 
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
 
@@ -338,14 +342,28 @@ const App: React.FC = () => {
     setIsCleanupPromptOpen(false);
   };
 
-  const openAddModal = (type: 'category' | 'zone' | 'zone2', mode: 'single' | 'bulk', id?: string) => {
+  const openAddModal = (type: 'category' | 'zone' | 'zone2' | 'new_item', mode: 'single' | 'bulk', id?: string) => {
     setModalType(type);
     setModalTarget({ type: mode, id });
     setNewName("");
+    if (type === 'new_item') {
+      setNewItemData({ code: '', description: '', category: availableCategories[0], zone: 'Unassigned', zone2: 'Unassigned', qty: 1 });
+    }
     setIsAddModalOpen(true);
   };
 
   const handleConfirmAdd = () => {
+    if (modalType === 'new_item') {
+      if (!newItemData.code || !newItemData.description) return;
+      const newItem: InventoryItem = {
+        id: `${newItemData.code}-${Date.now()}`,
+        ...newItemData
+      };
+      setItems(prev => [newItem, ...prev]);
+      setIsAddModalOpen(false);
+      return;
+    }
+
     if (!newName.trim()) return;
     const name = newName.trim();
     
@@ -357,7 +375,6 @@ const App: React.FC = () => {
         setItems(prev => prev.map(item => item.id === modalTarget.id ? { ...item, category: name } : item));
       }
     } else {
-      // Handles both zone and zone2 field updates
       const fieldToUpdate = modalType === 'zone2' ? 'zone2' : 'zone';
       setAvailableZones(prev => prev.includes(name) ? prev : [...prev, name].sort());
       if (modalTarget?.type === 'bulk') {
@@ -371,21 +388,37 @@ const App: React.FC = () => {
     setIsAddModalOpen(false);
   };
 
-  const handleFieldChange = (id: string, field: 'category' | 'zone' | 'zone2', value: string) => {
+  const handleFieldChange = (id: string, field: 'category' | 'zone' | 'zone2' | 'qty', value: string | number) => {
     if (value === '__NEW__') {
-      openAddModal(field, 'single', id);
+      openAddModal(field as any, 'single', id);
     } else {
-      setItems(prev => prev.map(item => item.id === id ? { ...item, [field]: value } : item));
+      setItems(prev => prev.map(item => {
+        if (item.id === id) {
+          const newValue = field === 'qty' ? (typeof value === 'string' ? (parseInt(value) || 0) : value) : value;
+          return { ...item, [field]: newValue };
+        }
+        return item;
+      }));
     }
   };
 
-  const handleBulkFieldChange = (field: 'category' | 'zone' | 'zone2', value: string) => {
+  const handleBulkFieldChange = (field: 'category' | 'zone' | 'zone2' | 'qty', value: string | number) => {
     if (value === '__NEW__') {
-      openAddModal(field, 'bulk');
+      openAddModal(field as any, 'bulk');
     } else {
-      setItems(prev => prev.map(item => selectedItems.has(item.id) ? { ...item, [field]: value } : item));
-      setSelectedItems(new Set());
+      setItems(prev => prev.map(item => {
+        if (selectedItems.has(item.id)) {
+          const newValue = field === 'qty' ? (typeof value === 'string' ? (parseInt(value) || 0) : value) : value;
+          return { ...item, [field]: newValue };
+        }
+        return item;
+      }));
+      if (field !== 'qty') setSelectedItems(new Set());
     }
+  };
+
+  const adjustQty = (id: string, delta: number) => {
+    setItems(prev => prev.map(item => item.id === id ? { ...item, qty: Math.max(0, item.qty + delta) } : item));
   };
 
   const toggleSelection = (id: string) => {
@@ -519,13 +552,9 @@ const App: React.FC = () => {
     
     return items.filter(item => {
       const itemText = (item.description + " " + item.code).toLowerCase();
-      
-      // Match all search tokens (AND search)
       const matchS = searchTokens.every(token => itemText.includes(token));
-      
       const matchC = selectedCategory === "All" || item.category === selectedCategory;
       const matchZ = selectedZone === "All" || item.zone === selectedZone || item.zone2 === selectedZone;
-      
       return matchS && matchC && matchZ;
     });
   }, [items, searchTerm, selectedCategory, selectedZone]);
@@ -555,6 +584,50 @@ const App: React.FC = () => {
         <div className="fixed inset-0 bg-pink-900/30 backdrop-blur-sm z-40 lg:hidden" onClick={() => setIsMobileMenuOpen(false)}/>
       )}
 
+      {/* Add New Item / Category Modal */}
+      {isAddModalOpen && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 animate-in fade-in">
+           <div className="bg-white rounded-3xl w-full max-w-md p-6 shadow-2xl border border-pink-100">
+             <div className="flex justify-between items-center mb-6">
+               <h3 className="text-lg font-black text-slate-800 flex items-center gap-2">
+                 {modalType === 'new_item' ? <Plus className="w-5 h-5 text-pink-500" /> : modalType === 'category' ? <Tag className="w-5 h-5 text-pink-500" /> : <MapPin className="w-5 h-5 text-pink-500" />}
+                 {modalType === 'new_item' ? 'Add New Item' : `New ${modalType === 'category' ? 'Category' : 'Zone'}`}
+               </h3>
+               <button onClick={() => setIsAddModalOpen(false)} className="text-slate-400 hover:text-slate-600 p-1 rounded-full hover:bg-slate-50"><X className="w-5 h-5" /></button>
+             </div>
+             
+             {modalType === 'new_item' ? (
+               <div className="space-y-4">
+                 <div><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1">SKU / Part Code</label><input type="text" className="w-full px-4 py-3 bg-slate-50 rounded-xl outline-none border border-slate-200 focus:border-pink-500 font-bold text-slate-800" value={newItemData.code} onChange={(e) => setNewItemData({...newItemData, code: e.target.value})} /></div>
+                 <div><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1">Description</label><input type="text" className="w-full px-4 py-3 bg-slate-50 rounded-xl outline-none border border-slate-200 focus:border-pink-500 font-bold text-slate-800" value={newItemData.description} onChange={(e) => setNewItemData({...newItemData, description: e.target.value})} /></div>
+                 <div className="grid grid-cols-2 gap-3">
+                    <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1">Category</label>
+                        <select className="w-full px-3 py-3 bg-slate-50 rounded-xl outline-none border border-slate-200 focus:border-pink-500 font-bold text-slate-800 appearance-none" value={newItemData.category} onChange={(e) => setNewItemData({...newItemData, category: e.target.value})}>
+                            {availableCategories.map(c => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                    </div>
+                    <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1">Initial Qty</label>
+                        <input type="number" className="w-full px-4 py-3 bg-slate-50 rounded-xl outline-none border border-slate-200 focus:border-pink-500 font-bold text-slate-800" value={newItemData.qty} onChange={(e) => setNewItemData({...newItemData, qty: parseInt(e.target.value) || 0})} />
+                    </div>
+                 </div>
+               </div>
+             ) : (
+               <div className="mb-6">
+                 <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Name</label>
+                 <input autoFocus type="text" value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleConfirmAdd()} placeholder={`e.g., ${modalType === 'category' ? 'Transmission' : 'Zone D'}`} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-pink-500/20 focus:border-pink-500 outline-none font-bold text-slate-800" />
+               </div>
+             )}
+
+             <div className="flex gap-3 mt-8">
+               <button onClick={() => setIsAddModalOpen(false)} className="flex-1 py-3 text-slate-500 font-bold hover:bg-slate-50 rounded-xl text-sm">Cancel</button>
+               <button onClick={handleConfirmAdd} className="flex-[2] py-3 bg-pink-600 text-white font-bold rounded-xl shadow-lg shadow-pink-600/20 hover:bg-pink-700 text-sm">{modalType === 'new_item' ? 'Add Item' : 'Create & Apply'}</button>
+             </div>
+           </div>
+        </div>
+      )}
+
       {/* Cleanup Prompt Modal */}
       {isCleanupPromptOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-md p-4 animate-in fade-in duration-300">
@@ -574,29 +647,6 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* Add New Category/Zone Modal */}
-      {isAddModalOpen && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 animate-in fade-in">
-           <div className="bg-white rounded-3xl w-full max-w-sm p-6 shadow-2xl border border-pink-100">
-             <div className="flex justify-between items-center mb-6">
-               <h3 className="text-lg font-black text-slate-800 flex items-center gap-2">
-                 {modalType === 'category' ? <Tag className="w-5 h-5 text-pink-500" /> : <MapPin className="w-5 h-5 text-pink-500" />}
-                 New {modalType === 'category' ? 'Category' : 'Zone'}
-               </h3>
-               <button onClick={() => setIsAddModalOpen(false)} className="text-slate-400 hover:text-slate-600 p-1 rounded-full hover:bg-slate-50"><X className="w-5 h-5" /></button>
-             </div>
-             <div className="mb-6">
-               <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Name</label>
-               <input autoFocus type="text" value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleConfirmAdd()} placeholder={`e.g., ${modalType === 'category' ? 'Transmission' : 'Zone D'}`} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-pink-500/20 focus:border-pink-500 outline-none font-bold text-slate-800" />
-             </div>
-             <div className="flex gap-3">
-               <button onClick={() => setIsAddModalOpen(false)} className="flex-1 py-3 text-slate-500 font-bold hover:bg-slate-50 rounded-xl text-sm">Cancel</button>
-               <button onClick={handleConfirmAdd} className="flex-[2] py-3 bg-pink-600 text-white font-bold rounded-xl shadow-lg shadow-pink-600/20 hover:bg-pink-700 text-sm">Create & Apply</button>
-             </div>
-           </div>
-        </div>
-      )}
-
       {/* Bulk Action Bar */}
       {selectedItems.size > 0 && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] animate-in slide-in-from-bottom-10 fade-in duration-300">
@@ -606,10 +656,10 @@ const App: React.FC = () => {
             </div>
             
             <div className="flex items-center gap-3">
-              <span className="text-[10px] uppercase font-black text-slate-500 tracking-widest hidden sm:inline">Move to:</span>
+              <span className="text-[10px] uppercase font-black text-slate-500 tracking-widest hidden sm:inline">Bulk Edit:</span>
               <div className="flex gap-2">
                 <div className="relative">
-                  <select className="appearance-none bg-slate-800 border border-slate-700 hover:border-pink-500 rounded-xl px-4 py-2 pr-8 text-[10px] sm:text-xs font-bold focus:ring-2 focus:ring-pink-500/50 outline-none transition-all cursor-pointer min-w-[80px]" onChange={(e) => handleBulkFieldChange('category', e.target.value)} value="">
+                  <select className="appearance-none bg-slate-800 border border-slate-700 hover:border-pink-500 rounded-xl px-4 py-2 pr-8 text-[10px] sm:text-xs font-bold outline-none cursor-pointer min-w-[80px]" onChange={(e) => handleBulkFieldChange('category', e.target.value)} value="">
                       <option value="" disabled>Cat...</option>
                       {availableCategories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
                       <option value="__NEW__" className="text-pink-400 font-bold">+ New</option>
@@ -617,20 +667,21 @@ const App: React.FC = () => {
                   <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
                 </div>
                 <div className="relative">
-                  <select className="appearance-none bg-slate-800 border border-slate-700 hover:border-pink-500 rounded-xl px-4 py-2 pr-8 text-[10px] sm:text-xs font-bold focus:ring-2 focus:ring-pink-500/50 outline-none transition-all cursor-pointer min-w-[80px]" onChange={(e) => handleBulkFieldChange('zone', e.target.value)} value="">
+                  <select className="appearance-none bg-slate-800 border border-slate-700 hover:border-pink-500 rounded-xl px-4 py-2 pr-8 text-[10px] sm:text-xs font-bold outline-none cursor-pointer min-w-[80px]" onChange={(e) => handleBulkFieldChange('zone', e.target.value)} value="">
                       <option value="" disabled>Zone 1...</option>
                       {availableZones.map(z => <option key={z} value={z}>{z}</option>)}
                       <option value="__NEW__" className="text-pink-400 font-bold">+ New</option>
                   </select>
                   <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
                 </div>
-                <div className="relative">
-                  <select className="appearance-none bg-slate-800 border border-slate-700 hover:border-pink-500 rounded-xl px-4 py-2 pr-8 text-[10px] sm:text-xs font-bold focus:ring-2 focus:ring-pink-500/50 outline-none transition-all cursor-pointer min-w-[80px]" onChange={(e) => handleBulkFieldChange('zone2', e.target.value)} value="">
-                      <option value="" disabled>Zone 2...</option>
-                      {availableZones.map(z => <option key={z} value={z}>{z}</option>)}
-                      <option value="__NEW__" className="text-pink-400 font-bold">+ New</option>
-                  </select>
-                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
+                <div className="flex items-center gap-2 bg-slate-800 border border-slate-700 rounded-xl px-3 py-1 text-white">
+                    <span className="text-[9px] font-black uppercase text-slate-500">Qty</span>
+                    <input 
+                        type="number" 
+                        placeholder="Set" 
+                        className="bg-transparent w-10 text-xs font-bold outline-none border-b border-white/20 focus:border-pink-500" 
+                        onKeyDown={(e) => { if (e.key === 'Enter') { handleBulkFieldChange('qty', (e.target as HTMLInputElement).value); (e.target as HTMLInputElement).value = ''; } }}
+                    />
                 </div>
               </div>
             </div>
@@ -687,8 +738,10 @@ const App: React.FC = () => {
             <h2 className="text-xl sm:text-2xl font-black text-slate-800 tracking-tight">{activeTab === 'overview' ? 'Real-time Stats' : 'Manage Stock'}</h2>
           </div>
           <div className="flex items-center gap-2 sm:gap-3 w-full sm:w-auto justify-end">
-            {items.length > 0 && (
-              <button onClick={() => setIsCleanupPromptOpen(true)} className="p-2 sm:p-3 text-slate-400 hover:text-rose-500 hover:bg-rose-50 rounded-xl sm:rounded-2xl transition-all"><Trash2 className="w-4 sm:w-5 h-4 sm:h-5" /></button>
+            {activeTab === 'inventory' && (
+                <button onClick={() => openAddModal('new_item', 'single')} className="px-4 py-3 bg-pink-100 text-pink-600 rounded-2xl hover:bg-pink-200 transition-all font-black text-sm flex items-center gap-2 shadow-sm border border-pink-200">
+                    <Plus className="w-4 h-4" /> Add Item
+                </button>
             )}
             <button onClick={() => setIsExportModalOpen(true)} disabled={items.length === 0} className="px-3 sm:px-4 py-2 sm:py-3 bg-white border border-slate-200 hover:border-pink-300 hover:bg-pink-50 text-slate-700 hover:text-pink-600 rounded-xl sm:rounded-2xl transition-all font-bold text-xs sm:text-sm flex items-center gap-2 shadow-sm disabled:opacity-50 whitespace-nowrap"><Download className="w-3.5 sm:w-4 h-3.5 sm:h-4" /><span className="hidden sm:inline">Export</span></button>
             <label className="flex items-center gap-2 px-4 sm:px-6 py-2 sm:py-3 bg-slate-900 hover:bg-pink-600 text-white rounded-xl sm:rounded-2xl cursor-pointer transition-all shadow-xl shadow-slate-900/10 font-bold text-xs sm:text-sm whitespace-nowrap">
@@ -704,10 +757,11 @@ const App: React.FC = () => {
                 <div className="absolute inset-0 bg-pink-500 blur-3xl opacity-20 animate-pulse"></div>
                 <div className="relative bg-white p-8 sm:p-10 rounded-[2rem] sm:rounded-[3rem] shadow-2xl border border-pink-50"><Sparkles className="w-10 sm:w-12 h-10 sm:h-12 text-pink-500" /></div>
               </div>
-              <h3 className="text-2xl sm:text-3xl font-black text-slate-800 mb-3 sm:mb-4 tracking-tight">Warehouse Logistics</h3>
-              <p className="text-slate-500 mb-8 sm:mb-10 leading-relaxed text-base sm:text-lg font-medium">AutoPart now supports dual Zones! Categorize your inventory and track multiple warehouse locations with ease.</p>
+              <h3 className="text-2xl sm:text-3xl font-black text-slate-800 mb-3 sm:mb-4 tracking-tight">Full Control Over Stock</h3>
+              <p className="text-slate-500 mb-8 sm:mb-10 leading-relaxed text-base sm:text-lg font-medium">AutoPart is now fully editable. Update quantities in real-time, add new items manually, and organize your warehouse with dual zones.</p>
               <div className="flex flex-col sm:flex-row gap-4 w-full justify-center">
                 <label className="px-6 sm:px-8 py-3.5 sm:py-4 bg-pink-600 text-white font-black rounded-2xl sm:rounded-[1.5rem] hover:bg-pink-700 transition-all shadow-xl shadow-pink-600/20 cursor-pointer text-center">Upload CSV File <input type="file" className="hidden" accept=".csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) { const r = new FileReader(); r.onload = (e) => processCSV(e.target?.result as string); r.readAsText(f); } }} /></label>
+                <button onClick={() => openAddModal('new_item', 'single')} className="px-6 sm:px-8 py-3.5 sm:py-4 bg-white text-slate-700 border-2 border-slate-100 font-black rounded-2xl sm:rounded-[1.5rem] hover:border-pink-200 hover:bg-pink-50 transition-all text-center">Manual Entry</button>
               </div>
             </div>
           ) : (
@@ -822,7 +876,7 @@ const App: React.FC = () => {
                           {visibleColumns.category && <th className="px-2 sm:px-6 py-2 sm:py-4 w-40 sm:w-48">Category</th>}
                           {visibleColumns.zone && <th className="px-2 sm:px-6 py-2 sm:py-4 w-32 sm:w-48">Zone 1</th>}
                           {visibleColumns.zone2 && <th className="px-2 sm:px-6 py-2 sm:py-4 w-32 sm:w-48">Zone 2</th>}
-                          {visibleColumns.qty && <th className="px-2 sm:px-6 py-2 sm:py-4 w-20 sm:w-28 text-right">Qty</th>}
+                          {visibleColumns.qty && <th className="px-2 sm:px-6 py-2 sm:py-4 w-28 sm:w-40 text-right">Qty</th>}
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-pink-50">{paginatedItems.map(item => (
@@ -858,7 +912,20 @@ const App: React.FC = () => {
                                </select>
                             </td>
                           )}
-                          {visibleColumns.qty && <td className={`px-2 sm:px-6 py-1.5 sm:py-2 text-right font-black text-[10px] sm:text-xs ${item.qty <= 0 ? 'text-rose-500' : 'text-slate-800'}`}>{item.qty}</td>}
+                          {visibleColumns.qty && (
+                            <td className="px-2 sm:px-6 py-1.5 sm:py-2">
+                              <div className="flex items-center justify-end gap-1.5 sm:gap-2">
+                                <button onClick={() => adjustQty(item.id, -1)} className="p-1 sm:p-1.5 rounded-lg bg-slate-50 hover:bg-rose-100 text-slate-400 hover:text-rose-600 border border-slate-200 transition-colors"><Minus className="w-3 h-3" /></button>
+                                <input 
+                                    type="number" 
+                                    value={item.qty} 
+                                    onChange={(e) => handleFieldChange(item.id, 'qty', e.target.value)}
+                                    className={`w-10 sm:w-14 bg-transparent text-right font-black text-[10px] sm:text-xs outline-none focus:bg-pink-50 rounded px-1 transition-all ${item.qty <= 0 ? 'text-rose-500' : 'text-slate-800'}`}
+                                />
+                                <button onClick={() => adjustQty(item.id, 1)} className="p-1 sm:p-1.5 rounded-lg bg-slate-50 hover:bg-emerald-100 text-slate-400 hover:text-emerald-600 border border-slate-200 transition-colors"><Plus className="w-3 h-3" /></button>
+                              </div>
+                            </td>
+                          )}
                         </tr>
                       ))}</tbody></table>
                   </div>
@@ -890,12 +957,12 @@ const App: React.FC = () => {
               <button onClick={() => setExportFormat('standard')} className={`relative p-4 sm:p-6 rounded-2xl border-2 text-left transition-all ${exportFormat === 'standard' ? 'border-pink-500 bg-pink-50/50' : 'border-slate-100 hover:bg-slate-50'}`}>
                 <FileText className={`w-8 sm:w-10 h-8 sm:h-10 mb-3 sm:mb-4 ${exportFormat === 'standard' ? 'text-pink-500' : 'text-slate-300'}`} />
                 <h4 className="font-black text-xs sm:text-sm uppercase tracking-wide mb-1 sm:mb-2">Standard CSV</h4>
-                <p className="text-[10px] sm:text-xs text-slate-500 leading-tight">Flat list format including both Zone fields.</p>
+                <p className="text-[10px] sm:text-xs text-slate-500 leading-tight">Flat list format including both Zone fields and updated quantities.</p>
               </button>
               <button onClick={() => setExportFormat('categorized')} className={`relative p-4 sm:p-6 rounded-2xl border-2 text-left transition-all ${exportFormat === 'categorized' ? 'border-pink-500 bg-pink-50/50' : 'border-slate-100 hover:bg-slate-50'}`}>
                 <FileSpreadsheet className={`w-8 sm:w-10 h-8 sm:h-10 mb-3 sm:mb-4 ${exportFormat === 'categorized' ? 'text-pink-500' : 'text-slate-300'}`} />
                 <h4 className="font-black text-xs sm:text-sm uppercase tracking-wide mb-1 sm:mb-2">Categorized Excel</h4>
-                <p className="text-[10px] sm:text-xs text-slate-500 leading-tight">Formatted report with all zone locations listed.</p>
+                <p className="text-[10px] sm:text-xs text-slate-500 leading-tight">Formatted report with all zones and quantities listed.</p>
               </button>
             </div>
             <div className="flex gap-3 sm:gap-4 pt-4 border-t border-slate-100">
