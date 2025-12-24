@@ -566,34 +566,6 @@ const App: React.FC = () => {
     setTimeout(() => setIsCleanupPromptOpen(true), 1000);
   };
 
-  const syncToGitHub = async () => {
-    if (!ghConfig.token || !ghConfig.repo || !ghConfig.path) { setIsSyncModalOpen(true); return; }
-    setIsSyncing(true);
-    setSyncStatus('idle');
-    try {
-      const contentBase64 = btoa(unescape(encodeURIComponent(generateStandardCSV())));
-      const getFile = await fetch(`https://api.github.com/repos/${ghConfig.repo}/contents/${ghConfig.path}?ref=${ghConfig.branch}`, {
-        headers: { 'Authorization': `token ${ghConfig.token}`, 'Accept': 'application/vnd.github.v3+json' }
-      });
-      let sha: string | undefined;
-      if (getFile.status === 200) { sha = (await getFile.json()).sha; }
-      const put = await fetch(`https://api.github.com/repos/${ghConfig.repo}/contents/${ghConfig.path}`, {
-        method: 'PUT',
-        headers: { 'Authorization': `token ${ghConfig.token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: `Inventory update: ${new Date().toLocaleString()}`, content: contentBase64, branch: ghConfig.branch, sha })
-      });
-      if (put.ok) { 
-        setSyncStatus('success'); 
-        setTimeout(() => setSyncStatus('idle'), 3000);
-        setTimeout(() => setIsCleanupPromptOpen(true), 1000);
-      }
-      else throw new Error();
-    } catch { setSyncStatus('error'); }
-    finally { setIsSyncing(false); }
-  };
-
-
-
   const handleTabChange = (tab: 'overview' | 'inventory') => {
     setActiveTab(tab);
     setIsMobileMenuOpen(false);
@@ -768,7 +740,7 @@ const App: React.FC = () => {
               <div className="bg-gradient-to-br from-pink-400 to-rose-600 p-2.5 rounded-2xl shadow-lg shadow-pink-500/20">
                 <Package className="w-6 h-6 text-white" />
               </div>
-              <h1 className="text-xl font-black tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white to-pink-200">AutoPart</h1>
+              <h1 className="text-xl font-black tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white to-pink-200">Quick Management</h1>
             </div>
             <nav className="space-y-2">
               <button onClick={() => handleTabChange('overview')} className={`w-full flex items-center gap-3.5 px-5 py-4 rounded-2xl transition-all duration-300 ${activeTab === 'overview' ? 'bg-gradient-to-r from-pink-600 to-rose-600 text-white shadow-xl shadow-pink-600/30' : 'text-slate-400 hover:text-white hover:bg-white/10'}`}>
@@ -781,17 +753,6 @@ const App: React.FC = () => {
           </div>
 
           <div className="mt-auto p-8 space-y-4 bg-white/5 backdrop-blur-md">
-            {/* GitHub Sync */}
-            <div className="p-4 rounded-2xl border transition-all bg-white/5 border-white/10 hover:bg-white/10">
-              <div className="flex justify-between items-center mb-3">
-                <p className="text-[10px] text-pink-400 uppercase tracking-[0.2em] font-black flex items-center gap-1.5"><Github className="w-3 h-3" /> GitHub</p>
-                <button onClick={() => { setIsMobileMenuOpen(false); setIsSyncModalOpen(true); }} className="p-1 hover:bg-white/10 rounded-lg transition-all text-slate-400"><Settings className="w-3 h-3" /></button>
-              </div>
-              <button onClick={syncToGitHub} disabled={items.length === 0 || isSyncing} className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-[10px] font-bold transition-all ${syncStatus === 'success' ? 'bg-emerald-500' : 'bg-white/10 hover:bg-white/20'} text-white disabled:opacity-50`}>
-                {isSyncing ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Push CSV'}
-              </button>
-            </div>
-
             {/* Supabase Status */}
             <div className={`p-4 rounded-2xl border transition-all bg-emerald-900/20 border-emerald-500/30`}>
               <div className="flex justify-between items-center mb-1">
@@ -799,6 +760,9 @@ const App: React.FC = () => {
                 <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse box-shadow-emerald-500/50" />
               </div>
               <p className="text-[9px] text-slate-400 mt-2 font-medium">Connected & Syncing Automatically</p>
+            </div>
+            <div className="flex justify-center">
+              <p className="text-[10px] text-slate-400 uppercase tracking-[0.2em] font-black flex items-center gap-1.5">Created by <a href="https://syamim.design/" target="_blank" rel="noopener noreferrer" className="text-pink-400 hover:underline">Syamim</a> with ❤️</p>
             </div>
           </div>
         </div>
@@ -1060,19 +1024,6 @@ const App: React.FC = () => {
                 <Download className="w-3.5 sm:w-4 h-3.5 sm:h-4" /> Download File
               </button>
             </div>
-          </div>
-        </div>
-      )}
-
-      {isSyncModalOpen && (
-        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-pink-900/40 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-3xl w-full max-w-md p-6 sm:p-8 shadow-2xl border border-pink-100">
-            <div className="flex justify-between items-center mb-6"><h3 className="text-lg sm:text-xl font-bold text-pink-800 flex items-center gap-2"><Github className="w-5 sm:w-6 h-5 sm:h-6" />GitHub Sync</h3><button onClick={() => setIsSyncModalOpen(false)} className="text-pink-300 hover:text-pink-600"><X className="w-5 h-5" /></button></div>
-            <div className="space-y-4">
-              <div><label className="text-[10px] font-bold text-pink-400 uppercase tracking-widest block mb-1">Token</label><input type="password" placeholder="ghp_..." className="w-full px-4 py-3 bg-pink-50 rounded-xl outline-none text-xs sm:text-sm" value={ghConfig.token} onChange={(e) => setGhConfig({...ghConfig, token: e.target.value})} /></div>
-              <div><label className="text-[10px] font-bold text-pink-400 uppercase tracking-widest block mb-1">Repo (user/repo)</label><input type="text" placeholder="user/repo" className="w-full px-4 py-3 bg-pink-50 rounded-xl outline-none text-xs sm:text-sm" value={ghConfig.repo} onChange={(e) => setGhConfig({...ghConfig, repo: e.target.value})} /></div>
-            </div>
-            <div className="mt-8 flex gap-3"><button onClick={() => setIsSyncModalOpen(false)} className="flex-1 py-3 text-pink-600 font-bold hover:bg-pink-50 rounded-xl text-xs sm:text-sm">Cancel</button><button onClick={() => { setIsSyncModalOpen(false); syncToGitHub(); }} className="flex-1 py-3 bg-pink-600 text-white font-bold rounded-xl shadow-xl shadow-pink-600/20 flex items-center justify-center gap-2 text-xs sm:text-sm"><Save className="w-4 h-4" />Save</button></div>
           </div>
         </div>
       )}
