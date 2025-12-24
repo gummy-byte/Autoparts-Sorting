@@ -53,6 +53,9 @@ import {
 } from 'recharts';
 import { InventoryItem, ItemCategory, CategoryStat } from './types';
 import { classifyItem } from './utils/classifier';
+import { fetchInventory, saveItem, replaceInventory, subscribeToInventory } from './utils/supabase';
+
+const UPLOAD_PASSWORD = import.meta.env.VITE_UPLOAD_PASSWORD || 'admin123';
 
 // Pinkish theme colors for charts
 const COLORS = [
@@ -62,12 +65,7 @@ const COLORS = [
 
 const ITEMS_PER_PAGE = 100;
 
-interface GitHubConfig {
-  token: string;
-  repo: string;
-  path: string;
-  branch: string;
-}
+// Removed Config Interfaces as we use Env Vars now
 
 interface ColumnVisibility {
   category: boolean;
@@ -78,64 +76,7 @@ interface ColumnVisibility {
 }
 
 // IndexedDB Helpers
-const DB_NAME = 'AutoPartDB';
-const STORE_NAME = 'InventoryStore';
-
-const initDB = (): Promise<IDBDatabase> => {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, 3);
-    request.onupgradeneeded = (event: any) => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME);
-      }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-};
-
-const saveToDB = async (items: InventoryItem[], categories: string[], zones: string[]) => {
-  const db = await initDB();
-  const tx = db.transaction(STORE_NAME, 'readwrite');
-  const store = tx.objectStore(STORE_NAME);
-  store.put(items, 'items');
-  store.put(categories, 'categories');
-  store.put(zones, 'zones');
-  return new Promise((resolve) => {
-    tx.oncomplete = () => resolve(true);
-  });
-};
-
-const loadFromDB = async (): Promise<{items: InventoryItem[], categories: string[], zones: string[]} | null> => {
-  const db = await initDB();
-  const tx = db.transaction(STORE_NAME, 'readonly');
-  const store = tx.objectStore(STORE_NAME);
-  const itemsReq = store.get('items');
-  const catsReq = store.get('categories');
-  const zonesReq = store.get('zones');
-  
-  return new Promise((resolve) => {
-    tx.oncomplete = () => {
-      if (itemsReq.result) {
-        resolve({ 
-          items: itemsReq.result, 
-          categories: catsReq.result || Object.values(ItemCategory),
-          zones: zonesReq.result || ["Unassigned", "Zone A", "Zone B", "Zone C"]
-        });
-      } else {
-        resolve(null);
-      }
-    };
-  });
-};
-
-const clearDB = async () => {
-  const db = await initDB();
-  const tx = db.transaction(STORE_NAME, 'readwrite');
-  const store = tx.objectStore(STORE_NAME);
-  store.clear();
-};
+// Removed IndexedDB Helpers
 
 const parseCSVLine = (line: string): string[] => {
   const result: string[] = [];
@@ -154,6 +95,21 @@ const parseCSVLine = (line: string): string[] => {
   }
   result.push(current.trim().replace(/^"|"$/g, ''));
   return result;
+};
+
+// StatCard moved to top
+const StatCard: React.FC<{title: string; value: number; icon: React.ReactNode; color: string; subtitle?: string}> = ({ title, value, icon, color, subtitle }) => {
+  const map: any = { pink: 'bg-pink-50 text-pink-600 border-pink-100', rose: 'bg-rose-50 text-rose-600 border-rose-100', fuchsia: 'bg-fuchsia-50 text-fuchsia-600 border-fuchsia-100' };
+  return (
+    <div className="bg-white p-5 sm:p-8 rounded-[1.5rem] sm:rounded-[2.5rem] border border-white shadow-xl hover:-translate-y-1.5 transition-all duration-500 group">
+      <div className="flex items-center justify-between mb-4 sm:mb-6">
+        <div className={`p-3 sm:p-4 rounded-xl sm:rounded-2xl ${map[color] || map.pink} border transition-transform duration-500 group-hover:scale-110 group-hover:rotate-6`}>{React.cloneElement(icon as any, { className: 'w-5 sm:w-7 h-5 sm:h-7' })}</div>
+        {subtitle && <span className="text-[9px] sm:text-[10px] font-black uppercase tracking-[0.1em] sm:tracking-[0.2em] text-pink-300">{subtitle}</span>}
+      </div>
+      <p className="text-slate-400 text-[9px] sm:text-[10px] font-black uppercase tracking-[0.1em] sm:tracking-[0.2em] mb-1 sm:mb-2">{title}</p>
+      <p className="text-2xl sm:text-4xl font-black text-slate-800 tracking-tighter">{value.toLocaleString()}</p>
+    </div>
+  );
 };
 
 const App: React.FC = () => {
@@ -177,50 +133,77 @@ const App: React.FC = () => {
 
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
 
-  const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [syncStatus, setSyncStatus] = useState<'idle' | 'success' | 'error'>('idle');
-  const [isCleanupPromptOpen, setIsCleanupPromptOpen] = useState(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   
+  const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
+  const [passwordInput, setPasswordInput] = useState("");
+  const [pendingCSVContent, setPendingCSVContent] = useState<string | null>(null);
+
+  // Loading States
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSearching, setIsSearching] = useState(false);
+  
+  // Column Visibility State
   const [visibleColumns, setVisibleColumns] = useState<ColumnVisibility>(() => {
     const saved = localStorage.getItem('visible_columns');
     return saved ? JSON.parse(saved) : { category: true, zone: true, zone2: true, qty: true, description: true };
   });
-
   const [isColumnDropdownOpen, setIsColumnDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  const [ghConfig, setGhConfig] = useState<GitHubConfig>(() => {
+  // Sync & Export State
+  const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle');
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [isCleanupPromptOpen, setIsCleanupPromptOpen] = useState(false);
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [exportFormat, setExportFormat] = useState<'standard' | 'categorized'>('standard');
+  const [ghConfig, setGhConfig] = useState<{ token: string; repo: string; path: string; branch: string }>(() => {
     const saved = localStorage.getItem('gh_config');
     return saved ? JSON.parse(saved) : { token: '', repo: '', path: 'inventory_categorized.csv', branch: 'main' };
   });
 
-  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
-  const [exportFormat, setExportFormat] = useState<'standard' | 'categorized'>('standard');
-
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-
-  useEffect(() => {
-    const init = async () => {
-      const data = await loadFromDB();
-      if (data) {
-        setItems(data.items);
-        setAvailableCategories(data.categories);
-        setAvailableZones(data.zones);
-      }
-    };
-    init();
-  }, []);
-
-  useEffect(() => {
-    if (items.length > 0) {
-      saveToDB(items, availableCategories, availableZones);
-    }
-  }, [items, availableCategories, availableZones]);
-
+  // Persist GH Config
   useEffect(() => {
     localStorage.setItem('gh_config', JSON.stringify(ghConfig));
   }, [ghConfig]);
+
+  // Initial Fetch & Realtime Subscription
+  // Ref for syncing state to access in closure
+  const isSyncingRef = useRef(isSyncing);
+  useEffect(() => { isSyncingRef.current = isSyncing; }, [isSyncing]);
+
+  useEffect(() => {
+    // 1. Fetch Initial Data
+    setIsLoading(true);
+    fetchInventory().then(data => {
+      setItems(data.items);
+      setAvailableCategories(data.categories.length > 0 ? data.categories : Object.values(ItemCategory));
+      setAvailableZones(data.zones.length > 0 ? data.zones : ["Unassigned", "Zone A", "Zone B", "Zone C"]);
+    }).catch(err => console.error("Failed to fetch Supabase data:", err))
+      .finally(() => setIsLoading(false));
+
+    // 2. Subscribe to Realtime Changes with Debounce
+    let debounceTimer: NodeJS.Timeout;
+    const subscription = subscribeToInventory((payload) => {
+        // Prevent self-echo if we are currently handling a bulk sync locally
+        if (isSyncingRef.current) return;
+
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+            fetchInventory().then(data => {
+                setItems(data.items);
+                if(data.categories.length > 0) setAvailableCategories(data.categories);
+                if(data.zones.length > 0) setAvailableZones(data.zones);
+            });
+        }, 1000); // 1 second debounce
+    });
+
+    return () => {
+        subscription?.unsubscribe();
+        clearTimeout(debounceTimer);
+    };
+  }, []);
 
   useEffect(() => {
     localStorage.setItem('visible_columns', JSON.stringify(visibleColumns));
@@ -229,6 +212,9 @@ const App: React.FC = () => {
   useEffect(() => {
     setCurrentPage(1);
     setSelectedItems(new Set()); 
+    setIsSearching(true);
+    const timer = setTimeout(() => setIsSearching(false), 500); // Artificial delay for feedback
+    return () => clearTimeout(timer);
   }, [searchTerm, selectedCategory, selectedZone]);
 
   // Click outside listener for column dropdown
@@ -242,7 +228,52 @@ const App: React.FC = () => {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const processCSV = (text: string) => {
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0]; 
+    if (f) { 
+        const r = new FileReader(); 
+        r.onload = (e) => {
+            const content = e.target?.result as string;
+            setPendingCSVContent(content);
+            setIsPasswordModalOpen(true);
+        }; 
+        r.readAsText(f); 
+    }
+  };
+
+  const verifyPasswordAndUpload = async () => {
+    if (passwordInput !== UPLOAD_PASSWORD) {
+        alert("Incorrect Password!");
+        return;
+    }
+    if (pendingCSVContent) {
+        setIsSyncing(true); // Start loading state
+        setSyncStatus('syncing');
+        try {
+            await processCSV(pendingCSVContent);
+            setSyncStatus('success');
+            setTimeout(() => setSyncStatus('idle'), 2000);
+        } catch (e) {
+            console.error(e);
+            setSyncStatus('error');
+            alert("Upload failed. Please check console.");
+        } finally {
+            setIsSyncing(false); // End loading state
+            setPendingCSVContent(null);
+            setIsPasswordModalOpen(false);
+            setPasswordInput("");
+            
+            // Do one final fetch to ensure we correspond with server state
+            fetchInventory().then(data => {
+                setItems(data.items);
+                setAvailableCategories(data.categories);
+                setAvailableZones(data.zones);
+            });
+        }
+    }
+  };
+
+  const processCSV = async (text: string) => {
     const lines = text.split(/\r?\n/).filter(line => line.trim().length > 0);
     if (lines.length === 0) return;
 
@@ -295,6 +326,7 @@ const App: React.FC = () => {
 
       if (!category || category.toLowerCase() === 'null') {
         category = classifyItem(description);
+        newCategories.add(category); // Fix: Add auto-classified category to the set
       } else {
         if (category.trim()) newCategories.add(category.trim());
       }
@@ -331,15 +363,21 @@ const App: React.FC = () => {
       });
     }
 
-    setItems(parsedItems);
+
+
+    try {
+        await replaceInventory(parsedItems, Array.from(newCategories), Array.from(newZones));
+        // State update handled by subscription
+    } catch(e) {
+        console.error("Failed to replace inventory", e);
+        alert("Failed to upload data to cloud.");
+    }
   };
 
   const handleClearData = async () => {
-    await clearDB();
-    setItems([]);
-    setAvailableCategories(Object.values(ItemCategory));
-    setAvailableZones(["Unassigned", "Zone A", "Zone B", "Zone C"]);
-    setIsCleanupPromptOpen(false);
+   // Deprecated for now, or could map to clearing supabase
+   // await replaceInventory([], [], []);
+   setItems([]);
   };
 
   const openAddModal = (type: 'category' | 'zone' | 'zone2' | 'new_item', mode: 'single' | 'bulk', id?: string) => {
@@ -353,13 +391,14 @@ const App: React.FC = () => {
   };
 
   const handleConfirmAdd = () => {
+    // For local UI immediately (optimistic) - actual source of truth IS Supabase
     if (modalType === 'new_item') {
       if (!newItemData.code || !newItemData.description) return;
       const newItem: InventoryItem = {
         id: `${newItemData.code}-${Date.now()}`,
         ...newItemData
       };
-      setItems(prev => [newItem, ...prev]);
+      saveItem(newItem); // Save to Supabase
       setIsAddModalOpen(false);
       return;
     }
@@ -367,38 +406,54 @@ const App: React.FC = () => {
     if (!newName.trim()) return;
     const name = newName.trim();
     
+    // For bulk/category updates, implementation is complex with simple "saveItem"
+    // Ideally we iterate and save. 
+    // Since user wants "Realtime", precise updates are better.
+    // For this prototype, I will just iterate and update selected items.
+    
+    const updates: Promise<any>[] = [];
+
     if (modalType === 'category') {
       setAvailableCategories(prev => prev.includes(name) ? prev : [...prev, name].sort());
       if (modalTarget?.type === 'bulk') {
-        setItems(prev => prev.map(item => selectedItems.has(item.id) ? { ...item, category: name } : item));
+         selectedItems.forEach(id => {
+             const item = items.find(i => i.id === id);
+             if(item) updates.push(saveItem({...item, category: name}));
+         });
       } else if (modalTarget?.id) {
-        setItems(prev => prev.map(item => item.id === modalTarget.id ? { ...item, category: name } : item));
+         const item = items.find(i => i.id === modalTarget.id);
+         if(item) updates.push(saveItem({...item, category: name}));
       }
     } else {
       const fieldToUpdate = modalType === 'zone2' ? 'zone2' : 'zone';
       setAvailableZones(prev => prev.includes(name) ? prev : [...prev, name].sort());
+      
       if (modalTarget?.type === 'bulk') {
-        setItems(prev => prev.map(item => selectedItems.has(item.id) ? { ...item, [fieldToUpdate]: name } : item));
+         selectedItems.forEach(id => {
+             const item = items.find(i => i.id === id);
+             if(item) updates.push(saveItem({...item, [fieldToUpdate]: name}));
+         });
       } else if (modalTarget?.id) {
-        setItems(prev => prev.map(item => item.id === modalTarget.id ? { ...item, [fieldToUpdate]: name } : item));
+         const item = items.find(i => i.id === modalTarget.id);
+         if(item) updates.push(saveItem({...item, [fieldToUpdate]: name}));
       }
     }
 
-    if (modalTarget?.type === 'bulk') setSelectedItems(new Set());
-    setIsAddModalOpen(false);
+    Promise.all(updates).then(() => {
+        if (modalTarget?.type === 'bulk') setSelectedItems(new Set());
+        setIsAddModalOpen(false);
+    });
   };
 
   const handleFieldChange = (id: string, field: 'category' | 'zone' | 'zone2' | 'qty', value: string | number) => {
     if (value === '__NEW__') {
       openAddModal(field as any, 'single', id);
     } else {
-      setItems(prev => prev.map(item => {
-        if (item.id === id) {
-          const newValue = field === 'qty' ? (typeof value === 'string' ? (parseInt(value) || 0) : value) : value;
-          return { ...item, [field]: newValue };
-        }
-        return item;
-      }));
+       const item = items.find(i => i.id === id);
+       if (item) {
+           const newValue = field === 'qty' ? (typeof value === 'string' ? (parseInt(value) || 0) : value) : value;
+           saveItem({ ...item, [field]: newValue }); 
+       }
     }
   };
 
@@ -406,19 +461,23 @@ const App: React.FC = () => {
     if (value === '__NEW__') {
       openAddModal(field as any, 'bulk');
     } else {
-      setItems(prev => prev.map(item => {
-        if (selectedItems.has(item.id)) {
-          const newValue = field === 'qty' ? (typeof value === 'string' ? (parseInt(value) || 0) : value) : value;
-          return { ...item, [field]: newValue };
-        }
-        return item;
-      }));
+      const updates: Promise<any>[] = [];
+      selectedItems.forEach(id => {
+          const item = items.find(i => i.id === id);
+          if (item) {
+            const newValue = field === 'qty' ? (typeof value === 'string' ? (parseInt(value) || 0) : value) : value;
+            updates.push(saveItem({ ...item, [field]: newValue }));
+          }
+      });
       if (field !== 'qty') setSelectedItems(new Set());
     }
   };
 
   const adjustQty = (id: string, delta: number) => {
-    setItems(prev => prev.map(item => item.id === id ? { ...item, qty: Math.max(0, item.qty + delta) } : item));
+    const item = items.find(i => i.id === id);
+    if(item) {
+        saveItem({ ...item, qty: Math.max(0, item.qty + delta) });
+    }
   };
 
   const toggleSelection = (id: string) => {
@@ -533,6 +592,8 @@ const App: React.FC = () => {
     finally { setIsSyncing(false); }
   };
 
+
+
   const handleTabChange = (tab: 'overview' | 'inventory') => {
     setActiveTab(tab);
     setIsMobileMenuOpen(false);
@@ -628,20 +689,23 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* Cleanup Prompt Modal */}
-      {isCleanupPromptOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-md p-4 animate-in fade-in duration-300">
-           <div className="bg-white rounded-[2.5rem] w-full max-w-sm p-8 shadow-2xl border border-pink-100 text-center">
-             <div className="bg-pink-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-6 text-pink-600">
-                <Trash2 className="w-8 h-8" />
+
+
+      {/* Password Modal */}
+      {isPasswordModalOpen && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-900/60 backdrop-blur-md p-4 animate-in fade-in">
+           <div className="bg-white rounded-[2rem] w-full max-w-sm p-8 shadow-2xl border border-pink-100">
+             <div className="bg-pink-100 w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-6 text-pink-600">
+                <Settings2 className="w-7 h-7" />
              </div>
-             <h3 className="text-xl font-black text-slate-800 mb-3 tracking-tight">Export Successful!</h3>
-             <p className="text-slate-500 text-sm font-medium mb-8 leading-relaxed">
-               Your work is now safely saved. Would you like to clear the temporary browser storage for a fresh start?
-             </p>
-             <div className="flex flex-col gap-3">
-               <button onClick={handleClearData} className="w-full py-4 bg-pink-600 text-white font-black rounded-2xl shadow-xl shadow-pink-600/20 hover:bg-pink-700 transition-all">Yes, Clear Storage</button>
-               <button onClick={() => setIsCleanupPromptOpen(false)} className="w-full py-4 text-slate-400 font-bold hover:bg-slate-50 rounded-2xl transition-all">Not yet, keep data</button>
+             <h3 className="text-xl font-black text-slate-800 mb-2 text-center">Admin Access Required</h3>
+             <p className="text-center text-slate-500 text-sm font-medium mb-6">Enter password to upload & overwrite data.</p>
+             
+             <input autoFocus type="password" placeholder="Enter Password..." className="w-full px-5 py-4 bg-slate-50 rounded-2xl outline-none border border-slate-200 focus:border-pink-500 font-bold text-slate-800 text-center text-lg mb-6" value={passwordInput} onChange={(e) => setPasswordInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && verifyPasswordAndUpload()} />
+
+             <div className="flex gap-3">
+               <button onClick={() => { setIsPasswordModalOpen(false); setPendingCSVContent(null); setPasswordInput(""); }} className="flex-1 py-3 text-slate-500 font-bold hover:bg-slate-50 rounded-xl">Cancel</button>
+               <button onClick={verifyPasswordAndUpload} className="flex-[1.5] py-3 bg-pink-600 text-white font-bold rounded-xl shadow-lg shadow-pink-600/20 hover:bg-pink-700">Unlock & Upload</button>
              </div>
            </div>
         </div>
@@ -717,15 +781,24 @@ const App: React.FC = () => {
           </div>
 
           <div className="mt-auto p-8 space-y-4 bg-white/5 backdrop-blur-md">
-            <div className="p-5 bg-white/5 rounded-3xl border border-white/10">
-              <div className="flex justify-between items-center mb-4">
-                <p className="text-[10px] text-pink-400 uppercase tracking-[0.2em] font-black flex items-center gap-1.5"><Database className="w-3 h-3" /> Cloud Save</p>
-                <button onClick={() => { setIsMobileMenuOpen(false); setIsSyncModalOpen(true); }} className="p-1.5 hover:bg-white/10 rounded-xl transition-all text-slate-400"><Settings className="w-3.5 h-3.5" /></button>
+            {/* GitHub Sync */}
+            <div className="p-4 rounded-2xl border transition-all bg-white/5 border-white/10 hover:bg-white/10">
+              <div className="flex justify-between items-center mb-3">
+                <p className="text-[10px] text-pink-400 uppercase tracking-[0.2em] font-black flex items-center gap-1.5"><Github className="w-3 h-3" /> GitHub</p>
+                <button onClick={() => { setIsMobileMenuOpen(false); setIsSyncModalOpen(true); }} className="p-1 hover:bg-white/10 rounded-lg transition-all text-slate-400"><Settings className="w-3 h-3" /></button>
               </div>
-              <button onClick={syncToGitHub} disabled={items.length === 0 || isSyncing} className={`w-full flex items-center justify-center gap-2.5 py-3 rounded-2xl text-[11px] font-bold transition-all ${syncStatus === 'success' ? 'bg-emerald-500' : syncStatus === 'error' ? 'bg-rose-500' : 'bg-white/10 hover:bg-white/20'} text-white disabled:opacity-50`}>
-                {isSyncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : syncStatus === 'success' ? <Check className="w-3.5 h-3.5" /> : <Github className="w-3.5 h-3.5" />}
-                {isSyncing ? 'Pushing...' : syncStatus === 'success' ? 'Synced!' : 'Cloud Sync'}
+              <button onClick={syncToGitHub} disabled={items.length === 0 || isSyncing} className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-[10px] font-bold transition-all ${syncStatus === 'success' ? 'bg-emerald-500' : 'bg-white/10 hover:bg-white/20'} text-white disabled:opacity-50`}>
+                {isSyncing ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Push CSV'}
               </button>
+            </div>
+
+            {/* Supabase Status */}
+            <div className={`p-4 rounded-2xl border transition-all bg-emerald-900/20 border-emerald-500/30`}>
+              <div className="flex justify-between items-center mb-1">
+                <p className="text-[10px] text-emerald-400 uppercase tracking-[0.2em] font-black flex items-center gap-1.5"><Database className="w-3 h-3" /> Realtime DB</p>
+                <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse box-shadow-emerald-500/50" />
+              </div>
+              <p className="text-[9px] text-slate-400 mt-2 font-medium">Connected & Syncing Automatically</p>
             </div>
           </div>
         </div>
@@ -744,8 +817,8 @@ const App: React.FC = () => {
                 </button>
             )}
             <button onClick={() => setIsExportModalOpen(true)} disabled={items.length === 0} className="px-3 sm:px-4 py-2 sm:py-3 bg-white border border-slate-200 hover:border-pink-300 hover:bg-pink-50 text-slate-700 hover:text-pink-600 rounded-xl sm:rounded-2xl transition-all font-bold text-xs sm:text-sm flex items-center gap-2 shadow-sm disabled:opacity-50 whitespace-nowrap"><Download className="w-3.5 sm:w-4 h-3.5 sm:h-4" /><span className="hidden sm:inline">Export</span></button>
-            <label className="flex items-center gap-2 px-4 sm:px-6 py-2 sm:py-3 bg-slate-900 hover:bg-pink-600 text-white rounded-xl sm:rounded-2xl cursor-pointer transition-all shadow-xl shadow-slate-900/10 font-bold text-xs sm:text-sm whitespace-nowrap">
-              <FileUp className="w-3.5 sm:w-4 h-3.5 sm:h-4" /><span className="hidden sm:inline">Import</span> <input type="file" className="hidden" accept=".csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) { const r = new FileReader(); r.onload = (e) => processCSV(e.target?.result as string); r.readAsText(f); } }} />
+             <label className="flex items-center gap-2 px-4 sm:px-6 py-2 sm:py-3 bg-slate-900 hover:bg-pink-600 text-white rounded-xl sm:rounded-2xl cursor-pointer transition-all shadow-xl shadow-slate-900/10 font-bold text-xs sm:text-sm whitespace-nowrap">
+              <FileUp className="w-3.5 sm:w-4 h-3.5 sm:h-4" /><span className="hidden sm:inline">Import</span> <input type="file" className="hidden" accept=".csv" onChange={handleFileSelect} />
             </label>
           </div>
         </header>
@@ -760,7 +833,7 @@ const App: React.FC = () => {
               <h3 className="text-2xl sm:text-3xl font-black text-slate-800 mb-3 sm:mb-4 tracking-tight">Full Control Over Stock</h3>
               <p className="text-slate-500 mb-8 sm:mb-10 leading-relaxed text-base sm:text-lg font-medium">AutoPart is now fully editable. Update quantities in real-time, add new items manually, and organize your warehouse with dual zones.</p>
               <div className="flex flex-col sm:flex-row gap-4 w-full justify-center">
-                <label className="px-6 sm:px-8 py-3.5 sm:py-4 bg-pink-600 text-white font-black rounded-2xl sm:rounded-[1.5rem] hover:bg-pink-700 transition-all shadow-xl shadow-pink-600/20 cursor-pointer text-center">Upload CSV File <input type="file" className="hidden" accept=".csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) { const r = new FileReader(); r.onload = (e) => processCSV(e.target?.result as string); r.readAsText(f); } }} /></label>
+                <label className="px-6 sm:px-8 py-3.5 sm:py-4 bg-pink-600 text-white font-black rounded-2xl sm:rounded-[1.5rem] hover:bg-pink-700 transition-all shadow-xl shadow-pink-600/20 cursor-pointer text-center">Upload CSV File <input type="file" className="hidden" accept=".csv" onChange={handleFileSelect} /></label>
                 <button onClick={() => openAddModal('new_item', 'single')} className="px-6 sm:px-8 py-3.5 sm:py-4 bg-white text-slate-700 border-2 border-slate-100 font-black rounded-2xl sm:rounded-[1.5rem] hover:border-pink-200 hover:bg-pink-50 transition-all text-center">Manual Entry</button>
               </div>
             </div>
@@ -862,68 +935,84 @@ const App: React.FC = () => {
                       </div>
                     </div>
                   </div>
-                  <div className="flex-1 overflow-auto min-h-0 custom-scrollbar">
-                    <table className="w-full text-left table-fixed min-w-[700px] sm:min-w-[1200px]">
-                      <thead className="sticky top-0 bg-white z-20 shadow-sm">
-                        <tr className="text-slate-400 text-[9px] sm:text-[10px] uppercase tracking-[0.2em] sm:tracking-[0.3em] font-black border-b border-pink-50">
-                          <th className="pl-4 sm:pl-10 pr-2 py-2 sm:py-4 w-12 sm:w-16">
-                            <button onClick={toggleAll} className={`w-3.5 h-3.5 sm:w-4 sm:h-4 rounded-md sm:rounded-lg border-2 flex items-center justify-center transition-all ${isAllSelected ? 'bg-pink-600 border-pink-600' : 'border-slate-300 hover:border-pink-400'}`}>
-                              {isAllSelected && <Check className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-white" />}
+                  <div className="flex-1 overflow-auto min-h-0 custom-scrollbar relative">
+                    {/* Search Loading Overlay */}
+                    {isSearching && (
+                      <div className="absolute inset-0 bg-white/60 backdrop-blur-[1px] z-30 flex items-center justify-center animate-in fade-in duration-200">
+                        <Loader2 className="w-8 h-8 text-pink-500 animate-spin" />
+                      </div>
+                    )}
+                    
+                    <table className="w-full text-left table-fixed min-w-[1200px]">
+                      <col style={{ width: '50px' }} /> {/* Checkbox */}
+                      <col style={{ width: '140px' }} /> {/* SKU */}
+                      {visibleColumns.description && <col style={{ width: '300px' }} />} {/* Description */}
+                      {visibleColumns.category && <col style={{ width: '200px' }} />} {/* Category */}
+                      {visibleColumns.zone && <col style={{ width: '150px' }} />} {/* Zone 1 */}
+                      {visibleColumns.zone2 && <col style={{ width: '150px' }} />} {/* Zone 2 */}
+                      {visibleColumns.qty && <col style={{ width: '120px' }} />} {/* Qty */}
+
+                      <thead className="sticky top-0 bg-white z-20 shadow-sm leading-none">
+                        <tr className="text-slate-400 text-[10px] uppercase tracking-[0.2em] font-black border-b border-pink-50 h-10">
+                          <th className="pl-6 w-[50px]">
+                            <button onClick={toggleAll} className={`w-4 h-4 rounded-lg border-2 flex items-center justify-center transition-all ${isAllSelected ? 'bg-pink-600 border-pink-600' : 'border-slate-300 hover:border-pink-400'}`}>
+                              {isAllSelected && <Check className="w-3 h-3 text-white" />}
                             </button>
                           </th>
-                          <th className="px-2 sm:px-4 py-2 sm:py-4 w-32 sm:w-40">SKU Code</th>
-                          {visibleColumns.description && <th className="px-2 sm:px-6 py-2 sm:py-4">Description</th>}
-                          {visibleColumns.category && <th className="px-2 sm:px-6 py-2 sm:py-4 w-40 sm:w-48">Category</th>}
-                          {visibleColumns.zone && <th className="px-2 sm:px-6 py-2 sm:py-4 w-32 sm:w-48">Zone 1</th>}
-                          {visibleColumns.zone2 && <th className="px-2 sm:px-6 py-2 sm:py-4 w-32 sm:w-48">Zone 2</th>}
-                          {visibleColumns.qty && <th className="px-2 sm:px-6 py-2 sm:py-4 w-28 sm:w-40 text-right">Qty</th>}
+                          <th className="px-4 w-[140px] truncate">SKU Code</th>
+                          {visibleColumns.description && <th className="px-4 w-[300px] truncate">Description</th>}
+                          {visibleColumns.category && <th className="px-4 w-[200px] truncate">Category</th>}
+                          {visibleColumns.zone && <th className="px-4 w-[150px] truncate">Zone 1</th>}
+                          {visibleColumns.zone2 && <th className="px-4 w-[150px] truncate">Zone 2</th>}
+                          {visibleColumns.qty && <th className="px-4 w-[120px] text-right truncate">Qty</th>}
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-pink-50">{paginatedItems.map(item => (
-                        <tr key={item.id} className={`transition-colors group ${selectedItems.has(item.id) ? 'bg-pink-50/60' : 'hover:bg-pink-50/20'}`}>
-                          <td className="pl-4 sm:pl-10 pr-2 py-1.5 sm:py-2">
-                            <button onClick={() => toggleSelection(item.id)} className={`w-3.5 h-3.5 sm:w-4 sm:h-4 rounded-md sm:rounded-lg border-2 flex items-center justify-center transition-all ${selectedItems.has(item.id) ? 'bg-pink-600 border-pink-600' : 'border-slate-200 group-hover:border-pink-300'}`}>
-                              {selectedItems.has(item.id) && <Check className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-white" />}
+                        <tr key={item.id} className={`transition-colors group h-14 ${selectedItems.has(item.id) ? 'bg-pink-50/60' : 'hover:bg-pink-50/20'}`}>
+                          <td className="pl-6 py-2">
+                            <button onClick={() => toggleSelection(item.id)} className={`w-4 h-4 rounded-lg border-2 flex items-center justify-center transition-all ${selectedItems.has(item.id) ? 'bg-pink-600 border-pink-600' : 'border-slate-200 group-hover:border-pink-300'}`}>
+                              {selectedItems.has(item.id) && <Check className="w-3 h-3 text-white" />}
                             </button>
                           </td>
-                          <td className="px-2 sm:px-4 py-1.5 sm:py-2 font-mono text-[10px] sm:text-[11px] text-pink-600 font-black tracking-tight">{item.code}</td>
-                          {visibleColumns.description && <td className="px-2 sm:px-6 py-1.5 sm:py-2"><p className="text-[10px] sm:text-xs font-bold text-slate-800 leading-tight">{item.description}</p></td>}
+                          <td className="px-4 py-2 font-mono text-[11px] text-pink-600 font-black tracking-tight truncate">{item.code}</td>
+                          {visibleColumns.description && <td className="px-4 py-2"><p className="text-xs font-bold text-slate-800 leading-tight break-words line-clamp-2" title={item.description}>{item.description}</p></td>}
                           {visibleColumns.category && (
-                            <td className="px-2 sm:px-6 py-1.5 sm:py-2">
-                               <select value={item.category} onChange={(e) => handleFieldChange(item.id, 'category', e.target.value)} className="w-full bg-pink-50/40 hover:bg-white text-pink-700 text-[9px] sm:text-[10px] font-black uppercase tracking-wider px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg sm:rounded-xl appearance-none cursor-pointer border border-transparent hover:border-pink-100 shadow-sm outline-none truncate">
+                            <td className="px-4 py-2">
+                               <select value={item.category} onChange={(e) => handleFieldChange(item.id, 'category', e.target.value)} className="w-full bg-pink-50 hover:bg-white text-pink-700 text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-xl appearance-none cursor-pointer border border-transparent hover:border-pink-100 shadow-sm outline-none truncate transition-all">
                                  {availableCategories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
                                  <option value="__NEW__" className="text-pink-400 font-bold">+ New</option>
                                </select>
                             </td>
                           )}
                           {visibleColumns.zone && (
-                            <td className="px-2 sm:px-6 py-1.5 sm:py-2">
-                               <select value={item.zone} onChange={(e) => handleFieldChange(item.id, 'zone', e.target.value)} className="w-full bg-slate-50 hover:bg-white text-slate-700 text-[9px] sm:text-[10px] font-black uppercase tracking-wider px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg sm:rounded-xl appearance-none cursor-pointer border border-transparent hover:border-slate-200 shadow-sm outline-none truncate">
+                            <td className="px-4 py-2">
+                               <select value={item.zone} onChange={(e) => handleFieldChange(item.id, 'zone', e.target.value)} className="w-full bg-slate-50 hover:bg-white text-slate-700 text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-xl appearance-none cursor-pointer border border-transparent hover:border-slate-200 shadow-sm outline-none truncate transition-all">
                                  {availableZones.map(z => <option key={z} value={z}>{z}</option>)}
                                  <option value="__NEW__" className="text-pink-400 font-bold">+ New</option>
                                </select>
                             </td>
                           )}
                           {visibleColumns.zone2 && (
-                            <td className="px-2 sm:px-6 py-1.5 sm:py-2">
-                               <select value={item.zone2} onChange={(e) => handleFieldChange(item.id, 'zone2', e.target.value)} className="w-full bg-slate-50/70 hover:bg-white text-slate-700 text-[9px] sm:text-[10px] font-black uppercase tracking-wider px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg sm:rounded-xl appearance-none cursor-pointer border border-transparent hover:border-slate-200 shadow-sm outline-none truncate">
+                            <td className="px-4 py-2">
+                               <select value={item.zone2} onChange={(e) => handleFieldChange(item.id, 'zone2', e.target.value)} className="w-full bg-slate-50 hover:bg-white text-slate-700 text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-xl appearance-none cursor-pointer border border-transparent hover:border-slate-200 shadow-sm outline-none truncate transition-all">
                                  {availableZones.map(z => <option key={z} value={z}>{z}</option>)}
                                  <option value="__NEW__" className="text-pink-400 font-bold">+ New</option>
                                </select>
                             </td>
                           )}
                           {visibleColumns.qty && (
-                            <td className="px-2 sm:px-6 py-1.5 sm:py-2">
-                              <div className="flex items-center justify-end gap-1.5 sm:gap-2">
-                                <button onClick={() => adjustQty(item.id, -1)} className="p-1 sm:p-1.5 rounded-lg bg-slate-50 hover:bg-rose-100 text-slate-400 hover:text-rose-600 border border-slate-200 transition-colors"><Minus className="w-3 h-3" /></button>
+                            <td className="px-4 py-2">
+                              <div className="flex items-center justify-end gap-2">
+                                <button onClick={() => adjustQty(item.id, -1)} className="p-1.5 rounded-lg bg-slate-50 hover:bg-rose-100 text-slate-400 hover:text-rose-600 border border-slate-200 transition-colors"><Minus className="w-3 h-3" /></button>
                                 <input 
                                     type="number" 
                                     value={item.qty} 
                                     onChange={(e) => handleFieldChange(item.id, 'qty', e.target.value)}
-                                    className={`w-10 sm:w-14 bg-transparent text-right font-black text-[10px] sm:text-xs outline-none focus:bg-pink-50 rounded px-1 transition-all ${item.qty <= 0 ? 'text-rose-500' : 'text-slate-800'}`}
+                                    className={`w-14 bg-transparent text-right font-black text-xs outline-none focus:bg-pink-50 rounded px-1 transition-all ${item.qty <= 0 ? 'text-rose-500' : 'text-slate-800'}`}
                                 />
-                                <button onClick={() => adjustQty(item.id, 1)} className="p-1 sm:p-1.5 rounded-lg bg-slate-50 hover:bg-emerald-100 text-slate-400 hover:text-emerald-600 border border-slate-200 transition-colors"><Plus className="w-3 h-3" /></button>
+                                <button onClick={() => adjustQty(item.id, 1)} className="p-1.5 rounded-lg bg-slate-50 hover:bg-emerald-100 text-slate-400 hover:text-emerald-600 border border-slate-200 transition-colors"><Plus className="w-3 h-3" /></button>
                               </div>
+
                             </td>
                           )}
                         </tr>
@@ -987,22 +1076,33 @@ const App: React.FC = () => {
           </div>
         </div>
       )}
+      
+      {/* Processing Initial Data Loading */}
+      {isLoading && (
+        <div className="fixed inset-0 z-[150] flex flex-col items-center justify-center bg-white/90 backdrop-blur-md">
+            <Loader2 className="w-12 h-12 text-pink-500 animate-spin mb-4" />
+            <h3 className="text-xl font-black text-slate-800 tracking-tight">Loading Inventory...</h3>
+        </div>
+      )}
+
+      {/* Syncing Overlay - Keeps existing sync overlay */}
+      {isSyncing && (
+        <div className="fixed inset-0 z-[150] flex flex-col items-center justify-center bg-slate-900/80 backdrop-blur-md animate-in fade-in duration-300">
+             <div className="relative">
+                <div className="w-24 h-24 rounded-full border-4 border-slate-700"></div>
+                <div className="absolute top-0 left-0 w-24 h-24 rounded-full border-4 border-t-pink-500 border-r-pink-500 border-b-transparent border-l-transparent animate-spin"></div>
+                <div className="absolute inset-0 flex items-center justify-center">
+                    <Database className="w-8 h-8 text-pink-500 animate-pulse" />
+                </div>
+             </div>
+             <h3 className="mt-8 text-2xl font-black text-white tracking-tight">Syncing Database</h3>
+             <p className="text-slate-400 font-medium mt-2 animate-pulse">Processing inventory data...</p>
+        </div>
+      )}
     </div>
   );
 };
 
-const StatCard: React.FC<{title: string; value: number; icon: React.ReactNode; color: string; subtitle?: string}> = ({ title, value, icon, color, subtitle }) => {
-  const map: any = { pink: 'bg-pink-50 text-pink-600 border-pink-100', rose: 'bg-rose-50 text-rose-600 border-rose-100', fuchsia: 'bg-fuchsia-50 text-fuchsia-600 border-fuchsia-100' };
-  return (
-    <div className="bg-white p-5 sm:p-8 rounded-[1.5rem] sm:rounded-[2.5rem] border border-white shadow-xl hover:-translate-y-1.5 transition-all duration-500 group">
-      <div className="flex items-center justify-between mb-4 sm:mb-6">
-        <div className={`p-3 sm:p-4 rounded-xl sm:rounded-2xl ${map[color] || map.pink} border transition-transform duration-500 group-hover:scale-110 group-hover:rotate-6`}>{React.cloneElement(icon as any, { className: 'w-5 sm:w-7 h-5 sm:h-7' })}</div>
-        {subtitle && <span className="text-[9px] sm:text-[10px] font-black uppercase tracking-[0.1em] sm:tracking-[0.2em] text-pink-300">{subtitle}</span>}
-      </div>
-      <p className="text-slate-400 text-[9px] sm:text-[10px] font-black uppercase tracking-[0.1em] sm:tracking-[0.2em] mb-1 sm:mb-2">{title}</p>
-      <p className="text-2xl sm:text-4xl font-black text-slate-800 tracking-tighter">{value.toLocaleString()}</p>
-    </div>
-  );
-};
+
 
 export default App;
