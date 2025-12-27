@@ -73,32 +73,39 @@ export const deleteItem = async (id: string) => {
     if (error) throw error;
 }
 
+export const saveCategory = async (name: string) => {
+    if (!supabase) return;
+    const { error } = await supabase.from('categories').upsert({ name }, { onConflict: 'name' });
+    if (error) throw error;
+}
+
+export const saveZone = async (name: string) => {
+    if (!supabase) return;
+    const { error } = await supabase.from('zones').upsert({ name }, { onConflict: 'name' });
+    if (error) throw error;
+}
+
 export const replaceInventory = async (items: InventoryItem[], categories: string[], zones: string[]) => {
   if (!supabase) throw new Error("Supabase client not initialized");
 
-  // 1. Delete all existing items (Clear the board)
-  const { error: deleteError } = await supabase.from('inventory_items').delete().neq('id', '0'); // Hack to delete all
-  if (deleteError) throw deleteError;
+  // Format data for JSONB
+  const catData = categories.map(name => ({ name }));
+  const zoneData = zones.map(name => ({ name }));
+  
+  // NOTE: If items array is too large (> 3MB usually), we might hit payload limits.
+  // For robustness with large files, we might need chunking, BUT chunking removes atomicity 
+  // unless we manage a transaction manually (which is hard over HTTP).
+  // For now, we assume reasonable file sizes (< 5000 rows).
+  
+  const { error } = await supabase.rpc('bulk_replace_inventory', {
+      p_categories: catData,
+      p_zones: zoneData,
+      p_items: items
+  });
 
-  // 2. Upsert categories & zones (We keep them additive usually, but we could clear them too if requested)
-  if (categories.length > 0) {
-      const catData = categories.map(name => ({ name }));
-      const { error: catError } = await supabase.from('categories').upsert(catData, { onConflict: 'name' });
-      if (catError) throw catError;
-  }
-  
-  if (zones.length > 0) {
-      const zoneData = zones.map(name => ({ name }));
-      const { error: zoneError } = await supabase.from('zones').upsert(zoneData, { onConflict: 'name' });
-      if (zoneError) throw zoneError;
-  }
-  
-  // 3. Insert new items in batches to avoid payload limits
-  const BATCH_SIZE = 100;
-  for (let i = 0; i < items.length; i += BATCH_SIZE) {
-      const batch = items.slice(i, i + BATCH_SIZE);
-      const { error: itemError } = await supabase.from('inventory_items').insert(batch);
-      if (itemError) throw itemError;
+  if (error) {
+      console.error("RPC Bulk Replace Failed:", error);
+      throw error;
   }
 };
 
