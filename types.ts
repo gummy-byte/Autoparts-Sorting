@@ -7,6 +7,7 @@ export interface InventoryItem {
   category: string;
   zone: string;
   zone2: string;
+  updated_at?: string; // ISO timestamp from database
 }
 
 export enum ItemCategory {

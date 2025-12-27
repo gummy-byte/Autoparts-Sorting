@@ -86,6 +86,10 @@ const App: React.FC = () => {
   const [isSyncing, setIsSyncing] = useState(false);
   const [isCleanupPromptOpen, setIsCleanupPromptOpen] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  
+  // Race Condition Protection: Track pending operations
+  const pendingOperations = useRef<Map<string, number>>(new Map());
+  const saveTimeouts = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const [exportFormat, setExportFormat] = useState<'standard' | 'categorized'>('standard');
   const [ghConfig, setGhConfig] = useState<{ token: string; repo: string; path: string; branch: string }>(() => {
     const saved = localStorage.getItem('gh_config');
@@ -119,8 +123,7 @@ const App: React.FC = () => {
     }).catch(err => console.error("Failed to fetch Supabase data:", err))
       .finally(() => setIsLoading(false));
 
-    // 2. Subscribe to Realtime Changes with Debounce
-    // 2. Subscribe to Realtime Changes - OPTIMIZED to handle delta updates only
+    // 2. Subscribe to Realtime Changes - OPTIMIZED with race condition protection
     const subscription = subscribeToInventory((payload) => {
         // Prevent self-echo if we are currently handling a bulk sync locally
         if (isSyncingRef.current) return;
@@ -129,12 +132,26 @@ const App: React.FC = () => {
 
         setItems((prevItems) => {
             if (eventType === 'INSERT') {
-                // Prevent duplicate inserts if we essentially already have it (though IDs should be unique)
+                // Prevent duplicate inserts
                 if (prevItems.some(i => i.id === newItem.id)) return prevItems;
                 return [...prevItems, newItem as InventoryItem];
             } else if (eventType === 'UPDATE') {
+                // CRITICAL: Check if we have a pending operation for this item
+                const pendingTimestamp = pendingOperations.current.get(newItem.id);
+                const serverTimestamp = new Date(newItem.updated_at || 0).getTime();
+                
+                // If we have a newer pending operation, ignore this server update
+                if (pendingTimestamp && pendingTimestamp > serverTimestamp) {
+                    console.log(`Ignoring stale server update for ${newItem.id}`);
+                    return prevItems;
+                }
+                
+                // Clear pending operation once server confirms
+                pendingOperations.current.delete(newItem.id);
+                
                 return prevItems.map(item => item.id === newItem.id ? (newItem as InventoryItem) : item);
             } else if (eventType === 'DELETE') {
+                pendingOperations.current.delete(oldItem.id);
                 return prevItems.filter(item => item.id !== oldItem.id);
             }
             return prevItems;
@@ -411,25 +428,41 @@ const App: React.FC = () => {
     if (value === '__NEW__') {
       openAddModal(field as any, 'single', id);
     } else {
-       const originalItems = [...items];
        const item = items.find(i => i.id === id);
        
        if (item) {
            const newValue = field === 'qty' ? (typeof value === 'string' ? (parseInt(value) || 0) : value) : value;
            const updatedItem = { ...item, [field]: newValue };
 
-           // 1. Optimistic Update
+           // 1. Mark operation as pending with timestamp
+           pendingOperations.current.set(id, Date.now());
+
+           // 2. Optimistic Update
            setItems(prev => prev.map(i => i.id === id ? updatedItem : i));
 
-           // 2. Persist to Server
-           saveItem(updatedItem).catch(err => {
-               console.error("Failed to save item, reverting", err);
-               // 3. Revert on failure - TARGETED ROLLBACK
-               // We only revert the specific item that failed, preserving any other updates 
-               // (like realtime changes to other items) that happened in the meantime.
-               setItems(currentItems => currentItems.map(i => i.id === id ? item : i));
-               alert("Failed to save change. Please check connection.");
-           }); 
+           // 3. Debounce rapid changes (e.g., typing in quantity)
+           const existingTimeout = saveTimeouts.current.get(id);
+           if (existingTimeout) clearTimeout(existingTimeout);
+           
+           const timeout = setTimeout(() => {
+               // 4. Persist to Server
+               saveItem(updatedItem)
+                   .then(() => {
+                       // Success - pending operation will be cleared by realtime update
+                   })
+                   .catch(err => {
+                       console.error("Failed to save item, reverting", err);
+                       // 5. Revert on failure
+                       pendingOperations.current.delete(id);
+                       setItems(currentItems => currentItems.map(i => i.id === id ? item : i));
+                       alert("Failed to save change. Please check connection.");
+                   })
+                   .finally(() => {
+                       saveTimeouts.current.delete(id);
+                   });
+           }, 300); // 300ms debounce for rapid changes
+           
+           saveTimeouts.current.set(id, timeout);
        }
     }
   };
@@ -438,14 +471,40 @@ const App: React.FC = () => {
     if (value === '__NEW__') {
       openAddModal(field as any, 'bulk');
     } else {
+      const itemsToUpdate: InventoryItem[] = [];
       const updates: Promise<any>[] = [];
+      
+      // 1. Collect items and prepare updates
       selectedItems.forEach(id => {
           const item = items.find(i => i.id === id);
           if (item) {
             const newValue = field === 'qty' ? (typeof value === 'string' ? (parseInt(value) || 0) : value) : value;
-            updates.push(saveItem({ ...item, [field]: newValue }));
+            const updatedItem = { ...item, [field]: newValue };
+            itemsToUpdate.push(updatedItem);
+            pendingOperations.current.set(id, Date.now());
           }
       });
+      
+      // 2. Optimistic Update
+      setItems(prev => prev.map(item => {
+          const updated = itemsToUpdate.find(u => u.id === item.id);
+          return updated || item;
+      }));
+      
+      // 3. Persist to Server
+      itemsToUpdate.forEach(item => {
+          updates.push(
+              saveItem(item).catch(err => {
+                  console.error(`Failed to save item ${item.id}`, err);
+                  pendingOperations.current.delete(item.id);
+              })
+          );
+      });
+      
+      Promise.all(updates).catch(() => {
+          alert("Some items failed to save. Please check connection.");
+      });
+      
       if (field !== 'qty') setSelectedItems(new Set());
     }
   };
@@ -453,7 +512,20 @@ const App: React.FC = () => {
   const adjustQty = (id: string, delta: number) => {
     const item = items.find(i => i.id === id);
     if(item) {
-        saveItem({ ...item, qty: Math.max(0, item.qty + delta) });
+        const updatedItem = { ...item, qty: Math.max(0, item.qty + delta) };
+        
+        // 1. Mark as pending
+        pendingOperations.current.set(id, Date.now());
+        
+        // 2. Optimistic Update
+        setItems(prev => prev.map(i => i.id === id ? updatedItem : i));
+        
+        // 3. Persist to Server
+        saveItem(updatedItem).catch(err => {
+            console.error("Failed to adjust quantity", err);
+            pendingOperations.current.delete(id);
+            setItems(prev => prev.map(i => i.id === id ? item : i));
+        });
     }
   };
 

@@ -18,7 +18,8 @@ create table if not exists inventory_items (
   description text,
   category text, -- We stored name here. If you want relation, change to category_id uuid references categories(id)
   zone text,
-  zone2 text
+  zone2 text,
+  updated_at timestamp with time zone default now()
 );
 
 -- 2. RLS Policies
@@ -47,6 +48,20 @@ as $$
   select * from inventory_items order by description asc;
 $$;
 
+-- Trigger to auto-update updated_at timestamp
+create or replace function update_updated_at_column()
+returns trigger as $$
+begin
+    new.updated_at = now();
+    return new;
+end;
+$$ language plpgsql;
+
+create trigger update_inventory_items_updated_at
+    before update on inventory_items
+    for each row
+    execute function update_updated_at_column();
+
 -- 5. RPC Function for Atomic Bulk Replacement
 create or replace function bulk_replace_inventory(
     p_categories jsonb,
@@ -71,7 +86,7 @@ begin
     on conflict (name) do nothing;
 
     -- 4. Insert Items
-    insert into inventory_items (id, qty, code, description, category, zone, zone2)
+    insert into inventory_items (id, qty, code, description, category, zone, zone2, updated_at)
     select 
         value->>'id',
         (value->>'qty')::int,
@@ -79,7 +94,8 @@ begin
         value->>'description',
         value->>'category',
         value->>'zone',
-        value->>'zone2'
+        value->>'zone2',
+        now()
     from jsonb_array_elements(p_items);
 end;
 $$;
