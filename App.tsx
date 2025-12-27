@@ -29,6 +29,7 @@ import PasswordModal from './components/PasswordModal';
 import ExportModal from './components/ExportModal';
 import BulkActionBar from './components/BulkActionBar';
 import QuantityInput from './components/QuantityInput';
+import VersionChecker from './components/VersionChecker';
 
 const UPLOAD_PASSWORD = import.meta.env.VITE_UPLOAD_PASSWORD || 'admin123';
 
@@ -44,6 +45,19 @@ interface ColumnVisibility {
 
 const naturalSort = (a: string, b: string) => {
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+};
+
+const formatTimeAgo = (dateString?: string) => {
+  if (!dateString) return '';
+  const date = new Date(dateString);
+  const now = new Date();
+  const diffInSeconds = Math.floor((now.getTime() - date.getTime()) / 1000);
+
+  if (diffInSeconds < 60) return 'just now'; // Handles negative values too
+  if (diffInSeconds < 3600) return `${Math.floor(diffInSeconds / 60)}m ago`;
+  if (diffInSeconds < 86400) return `${Math.floor(diffInSeconds / 3600)}h ago`;
+  if (diffInSeconds < 604800) return `${Math.floor(diffInSeconds / 86400)}d ago`;
+  return date.toLocaleDateString();
 };
 
 const App: React.FC = () => {
@@ -608,6 +622,9 @@ const App: React.FC = () => {
   return (
     <div className="h-screen w-full flex bg-[#fff1f5] font-['Inter'] overflow-hidden">
       
+      {/* Version Checker - Shows modal when update is needed */}
+      <VersionChecker />
+      
       <AddModal 
         isOpen={isAddModalOpen} 
         onClose={() => setIsAddModalOpen(false)} 
@@ -766,7 +783,12 @@ const App: React.FC = () => {
                             </button>
                           </td>
                           <td className="px-4 py-2 font-mono text-[11px] text-pink-600 font-black tracking-tight truncate">{item.code}</td>
-                          {visibleColumns.description && <td className="px-4 py-2"><p className="text-xs font-bold text-slate-800 leading-tight break-words line-clamp-2" title={item.description}>{item.description}</p></td>}
+                          {visibleColumns.description && (
+                            <td className="px-4 py-2">
+                              <p className="text-xs font-bold text-slate-800 leading-tight break-words line-clamp-2" title={item.description}>{item.description}</p>
+                              {item.updated_at && <p className="text-[10px] text-slate-400 mt-0.5 font-medium tracking-tight">Updated {formatTimeAgo(item.updated_at)}</p>}
+                            </td>
+                          )}
                           {visibleColumns.category && (
                             <td className="px-4 py-2">
                                <select value={item.category} onChange={(e) => handleFieldChange(item.id, 'category', e.target.value)} className="w-full bg-pink-50 hover:bg-white text-pink-700 text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-xl appearance-none cursor-pointer border border-transparent hover:border-pink-100 shadow-sm outline-none truncate transition-all">
